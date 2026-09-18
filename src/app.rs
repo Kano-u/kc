@@ -4,6 +4,12 @@ use crate::tui;
 use regex::Regex;
 use std::path::PathBuf;
 
+fn env_dir(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
 fn home_dir() -> PathBuf {
     if let Some(home) = std::env::var_os("USERPROFILE") {
         return PathBuf::from(home);
@@ -15,6 +21,9 @@ fn home_dir() -> PathBuf {
 }
 
 fn config_dir() -> PathBuf {
+    if let Some(dir) = env_dir("KC_CONFIG_DIR") {
+        return dir;
+    }
     if cfg!(windows) {
         home_dir().join(".config").join("kc")
     } else if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME") {
@@ -24,12 +33,8 @@ fn config_dir() -> PathBuf {
     }
 }
 
-pub fn data_dir() -> PathBuf {
-    config_dir().join("data")
-}
-
 pub fn notes_path() -> PathBuf {
-    data_dir().join("notes.jsonl")
+    config_dir().join("notes.jsonl")
 }
 
 pub fn config_path() -> PathBuf {
@@ -138,5 +143,21 @@ mod tests {
     fn missing_filter_list_is_empty() {
         let value: toml::Value = toml::from_str("history_limit = 10").unwrap();
         assert!(parse_filters(value.get("filter")).is_empty());
+    }
+
+    #[test]
+    fn empty_environment_paths_are_ignored() {
+        assert_eq!(env_dir("KC_TEST_UNSET_PATH"), None);
+        std::env::set_var("KC_TEST_EMPTY_PATH", "");
+        assert_eq!(env_dir("KC_TEST_EMPTY_PATH"), None);
+        std::env::remove_var("KC_TEST_EMPTY_PATH");
+    }
+
+    #[test]
+    fn environment_path_is_used_verbatim() {
+        let path = std::env::temp_dir().join("kc-environment-path-test");
+        std::env::set_var("KC_TEST_CONFIG_DIR", &path);
+        assert_eq!(env_dir("KC_TEST_CONFIG_DIR"), Some(path));
+        std::env::remove_var("KC_TEST_CONFIG_DIR");
     }
 }

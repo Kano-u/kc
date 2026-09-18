@@ -10,12 +10,10 @@
 - `Tab` / `→` 插入命令但不执行
 - `←` 编辑选中命令备注
 - 鼠标/触摸：点击选择、滚轮滚动、点击保存
-- 备注保存在 `~/.config/kc/data/notes.jsonl`
 - `Shift+Backspace` 删除选中命令的 Atuin 历史；无备注直接删除，有备注需确认
-- `Backspace` 删除搜索文本的最后一个字符；`Shift+Backspace` 删除选中的 Atuin 历史
 - 输入以空格开头时只搜索有备注的命令，空格后的文字参与匹配
 - 鼠标/触摸：点击选择、滚轮滚动、点击保存或确认
-- 备注保存在 `~/.config/kc/data/notes.jsonl`
+- 备注保存在 `~/.config/kc/notes.jsonl`
 
 ## 安装
 
@@ -76,6 +74,16 @@ filter = [
 ```
 
 上面的 `^dir$` 和 `^ls -la$` 只过滤完全相同的命令；`secret` 会过滤任何包含该文字的命令。
+
+### 自定义配置与数据目录
+
+设置 `KC_CONFIG_DIR` 后，`config.toml` 和备注数据 `notes.jsonl` 都会放在该目录。未设置时仍使用 `~/.config/kc`。
+
+```bash
+export KC_CONFIG_DIR="$HOME/kc"
+```
+
+建议使用绝对路径；相对路径会相对于启动 `kc` 时的工作目录解析。
 
 ## 开发检查
 

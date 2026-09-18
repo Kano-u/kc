@@ -15,6 +15,9 @@ Usage:
   kc init powershell      Print the PowerShell integration
   kc init bash            Print the Bash/Termux integration
   kc --help               Show this help
+
+Environment:
+  KC_CONFIG_DIR           Override the kc config/data directory
 ";
 
 fn main() -> ExitCode {
