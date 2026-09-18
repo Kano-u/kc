@@ -12,6 +12,7 @@
 - 鼠标/触摸：点击选择、滚轮滚动、点击保存
 - 备注保存在 `~/.config/kc/data/notes.jsonl`
 - `Shift+Backspace` 删除选中命令的 Atuin 历史；无备注直接删除，有备注需确认
+- `Backspace` 删除搜索文本的最后一个字符；`Shift+Backspace` 删除选中的 Atuin 历史
 - 输入以空格开头时只搜索有备注的命令，空格后的文字参与匹配
 - 鼠标/触摸：点击选择、滚轮滚动、点击保存或确认
 - 备注保存在 `~/.config/kc/data/notes.jsonl`

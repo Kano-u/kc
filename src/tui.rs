@@ -208,6 +208,13 @@ impl<'a> App<'a> {
         true
     }
 
+    fn remove_query_char(&mut self) {
+        if self.query.pop().is_some() {
+            self.notice = None;
+            self.refresh();
+        }
+    }
+
     /// 列表底部对齐，让最新命令贴着输入行显示。
     fn list_top(&self) -> u16 {
         if self.list_area.height == 0 {
@@ -406,6 +413,7 @@ fn event_loop(
                     KeyCode::Backspace if key.modifiers.contains(KeyModifiers::SHIFT) => {
                         app.request_delete();
                     }
+                    KeyCode::Backspace => app.remove_query_char(),
                     KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                         app.notice = None;
                         app.query.push(character);
@@ -1091,6 +1099,30 @@ mod tests {
         let app = App::new(&history, &mut notes, "");
         assert_eq!(app.filtered, vec!["older", "newest"]);
         assert_eq!(app.selected_command(), Some("newest"));
+    }
+
+    #[test]
+    fn backspace_removes_the_last_search_character() {
+        let history = vec!["git status".to_owned(), "git switch".to_owned()];
+        let mut notes = NoteStore::default();
+        let mut app = App::new(&history, &mut notes, "git s");
+        app.remove_query_char();
+        assert_eq!(app.query, "git ");
+        assert_eq!(app.filtered, vec!["git switch", "git status"]);
+
+        app.remove_query_char();
+        assert_eq!(app.query, "git");
+        assert_eq!(app.filtered, vec!["git switch", "git status"]);
+    }
+
+    #[test]
+    fn backspace_on_empty_query_is_safe() {
+        let history = vec!["dir".to_owned()];
+        let mut notes = NoteStore::default();
+        let mut app = App::new(&history, &mut notes, "");
+        app.remove_query_char();
+        assert_eq!(app.query, "");
+        assert_eq!(app.filtered, vec!["dir"]);
     }
 
     #[test]
