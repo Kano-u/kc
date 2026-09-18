@@ -33,12 +33,8 @@ fn config_dir() -> PathBuf {
     }
 }
 
-pub fn notes_path() -> PathBuf {
-    config_dir().join("notes.jsonl")
-}
-
-pub fn config_path() -> PathBuf {
-    config_dir().join("config.toml")
+pub fn data_paths() -> Result<crate::data_paths::DataPaths, String> {
+    crate::data_paths::resolve(&config_dir())
 }
 
 #[derive(Debug, Clone)]
@@ -57,8 +53,13 @@ impl Default for Config {
 }
 
 impl Config {
-    pub fn load() -> Self {
-        let Ok(text) = std::fs::read_to_string(config_path()) else {
+    pub fn load() -> Result<Self, String> {
+        let paths = data_paths()?;
+        Ok(Self::load_from(&paths.config))
+    }
+
+    fn load_from(path: &std::path::Path) -> Self {
+        let Ok(text) = std::fs::read_to_string(path) else {
             return Self::default();
         };
         let value: toml::Value = match toml::from_str(&text) {
@@ -98,7 +99,13 @@ fn parse_filters(value: Option<&toml::Value>) -> Vec<Regex> {
 }
 
 pub fn run(query: Option<&str>) -> std::process::ExitCode {
-    let config = Config::load();
+    let config = match Config::load() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("{error}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
     let query = query.unwrap_or_default();
     let history = match load_history(config.history_limit, &config.filters) {
         Ok(history) => history,

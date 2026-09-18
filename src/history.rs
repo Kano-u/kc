@@ -73,7 +73,46 @@ fn escape_regex(text: &str) -> String {
 }
 
 fn delete_query(command: &str) -> String {
-    format!("r/^{}$/", escape_regex(command))
+    // `atuin history list --cmd-only` trims command strings before printing.
+    // Match the displayed command while tolerating stored leading/trailing whitespace.
+    format!("r/^\\s*{}\\s*$/", escape_regex(command))
+}
+
+fn search_args(command: &str) -> Vec<String> {
+    vec![
+        "search".to_owned(),
+        "--search-mode".to_owned(),
+        "fulltext".to_owned(),
+        "--cmd-only".to_owned(),
+        "--print0".to_owned(),
+        "--filter-mode".to_owned(),
+        "global".to_owned(),
+        "--".to_owned(),
+        delete_query(command),
+    ]
+}
+
+fn matching_commands(command: &str) -> Result<Vec<String>, String> {
+    let output = Command::new("atuin")
+        .args(search_args(command))
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("无法启动 Atuin: {error}"))?;
+
+    if !output.status.success() {
+        // Atuin exits with 1 when nothing matches.
+        if output.stdout.is_empty() {
+            return Ok(Vec::new());
+        }
+        let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(if message.is_empty() {
+            "Atuin 搜索历史失败。".to_owned()
+        } else {
+            format!("Atuin 搜索历史失败: {message}")
+        });
+    }
+
+    Ok(parse_history(&output.stdout))
 }
 
 fn delete_args(command: &str) -> Vec<String> {
@@ -82,28 +121,43 @@ fn delete_args(command: &str) -> Vec<String> {
         "--delete".to_owned(),
         "--search-mode".to_owned(),
         "fulltext".to_owned(),
+        "--filter-mode".to_owned(),
+        "global".to_owned(),
         "--".to_owned(),
         delete_query(command),
     ]
 }
 
 pub fn delete_history(command: &str) -> Result<(), String> {
+    let matches = matching_commands(command)?;
+    if matches.is_empty() {
+        return Err(format!("Atuin 中未找到与“{command}”匹配的历史记录。"));
+    }
+
     let output = Command::new("atuin")
         .args(delete_args(command))
         .stdin(Stdio::null())
         .output()
         .map_err(|error| format!("无法启动 Atuin: {error}"))?;
 
-    if output.status.success() {
-        return Ok(());
+    if !output.status.success() {
+        let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(if message.is_empty() {
+            "Atuin 删除历史失败。".to_owned()
+        } else {
+            format!("Atuin 删除历史失败: {message}")
+        });
     }
 
-    let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    Err(if message.is_empty() {
-        "Atuin 删除历史失败。".to_owned()
+    let remaining = matching_commands(command)?;
+    if remaining.is_empty() {
+        Ok(())
     } else {
-        format!("Atuin 删除历史失败: {message}")
-    })
+        Err(format!(
+            "Atuin 仍有 {} 条与“{command}”匹配的历史记录。",
+            remaining.len()
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -180,12 +234,13 @@ mod tests {
     fn escapes_regex_metacharacters_for_exact_delete() {
         assert_eq!(
             delete_query("echo [$HOME] /tmp"),
-            "r/^echo \\[\\$HOME\\] \\x2ftmp$/".to_owned()
+            "r/^\\s*echo \\[\\$HOME\\] \\x2ftmp\\s*$/".to_owned()
         );
+        assert_eq!(delete_query("cd .."), "r/^\\s*cd \\.\\.\\s*$/".to_owned());
     }
 
     #[test]
-    fn delete_args_use_fulltext_regex_search() {
+    fn delete_args_use_exact_regex_search() {
         assert_eq!(
             delete_args("dir"),
             vec![
@@ -193,8 +248,28 @@ mod tests {
                 "--delete".to_owned(),
                 "--search-mode".to_owned(),
                 "fulltext".to_owned(),
+                "--filter-mode".to_owned(),
+                "global".to_owned(),
                 "--".to_owned(),
-                "r/^dir$/".to_owned(),
+                "r/^\\s*dir\\s*$/".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn search_args_use_the_same_exact_regex_as_delete() {
+        assert_eq!(
+            search_args("cd .."),
+            vec![
+                "search".to_owned(),
+                "--search-mode".to_owned(),
+                "fulltext".to_owned(),
+                "--cmd-only".to_owned(),
+                "--print0".to_owned(),
+                "--filter-mode".to_owned(),
+                "global".to_owned(),
+                "--".to_owned(),
+                "r/^\\s*cd \\.\\.\\s*$/".to_owned(),
             ]
         );
     }

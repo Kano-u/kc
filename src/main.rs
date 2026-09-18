@@ -1,4 +1,5 @@
 mod app;
+mod data_paths;
 mod history;
 mod notes;
 mod pick;

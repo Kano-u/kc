@@ -5,6 +5,7 @@
 ## 功能
 
 - 向上箭头打开 TUI
+- 顶部工具栏提供“备注”和“删除”，也可点击操作
 - 底部搜索，实时过滤命令和备注
 - `Enter` 执行选中命令
 - `Tab` / `→` 插入命令但不执行
@@ -13,7 +14,8 @@
 - `Shift+Backspace` 删除选中命令的 Atuin 历史；无备注直接删除，有备注需确认
 - 输入以空格开头时只搜索有备注的命令，空格后的文字参与匹配
 - 鼠标/触摸：点击选择、滚轮滚动、点击保存或确认
-- 备注保存在 `~/.config/kc/notes.jsonl`
+- 主机标记 `.host` 决定当前主机的配置文件和备注写入文件
+- 同目录下所有 `*.notes.jsonl` 会合并读取，同名备注取更新时间较新的记录
 
 ## 安装
 
@@ -56,7 +58,12 @@ eval "$(kc init bash)"
 
 ## 配置
 
-配置文件：`~/.config/kc/config.toml`
+同步目录中必须恰好存在一个 `.host` 文件，例如 `com.host`。文件名决定：
+
+- 配置文件：`com.config.toml`
+- 备注写入文件：`com.notes.jsonl`
+
+kc 会合并读取目录下所有 `*.notes.jsonl`。同名命令保留 `updated_at` 最新的一条，但保存时只写当前 `.host` 对应的备注文件。
 
 ```toml
 history_limit = 5000
@@ -77,7 +84,7 @@ filter = [
 
 ### 自定义配置与数据目录
 
-设置 `KC_CONFIG_DIR` 后，`config.toml` 和备注数据 `notes.jsonl` 都会放在该目录。未设置时仍使用 `~/.config/kc`。
+设置 `KC_CONFIG_DIR` 后，kc 从该目录查找 `.host`、`*.config.toml` 和 `*.notes.jsonl`。未设置时使用 `~/.config/kc`。
 
 ```bash
 export KC_CONFIG_DIR="$HOME/kc"

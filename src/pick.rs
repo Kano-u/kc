@@ -94,7 +94,7 @@ pub fn main(args: &[String]) -> ExitCode {
 }
 
 fn run_pick(query: &str) -> Result<PickResult, String> {
-    let config = Config::load();
+    let config = Config::load()?;
     let history = history::load_history(config.history_limit, &config.filters)?;
     let mut notes = NoteStore::load()?;
     crate::tui::run(query, &history, &mut notes)

@@ -31,6 +31,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const NOTE_SAVE_HINT: &str = "↵ 保存";
 const PLACEHOLDER: &str = "输入命令或备注";
 const CURSOR: &str = "❯ ";
+const TOOLBAR_NOTE: &str = "备注";
+const TOOLBAR_DELETE: &str = "删除";
+const TOOLBAR_GAP: u16 = 2;
 
 fn split_query(query: &str) -> (bool, &str) {
     match query.strip_prefix(' ') {
@@ -118,6 +121,8 @@ struct App<'a> {
     note_cursor: usize,
     note_command: Option<String>,
     list_area: Rect,
+    toolbar_note_area: Rect,
+    toolbar_delete_area: Rect,
     save_area: Rect,
     delete_command: Option<String>,
     confirm_area: Rect,
@@ -142,6 +147,8 @@ impl<'a> App<'a> {
             note_cursor: 0,
             note_command: None,
             list_area: Rect::default(),
+            toolbar_note_area: Rect::default(),
+            toolbar_delete_area: Rect::default(),
             save_area: Rect::default(),
             delete_command: None,
             confirm_area: Rect::default(),
@@ -239,6 +246,21 @@ impl<'a> App<'a> {
 
     fn selected_command(&self) -> Option<&str> {
         self.filtered.get(self.selected).map(String::as_str)
+    }
+
+    fn activate_toolbar(&mut self, position: Position) -> bool {
+        if self.mode != Mode::Search {
+            return false;
+        }
+        if self.toolbar_note_area.contains(position) {
+            self.enter_note_mode();
+            true
+        } else if self.toolbar_delete_area.contains(position) {
+            self.request_delete();
+            true
+        } else {
+            false
+        }
     }
 
     fn delete_request(&self) -> Option<DeleteRequest> {
@@ -483,6 +505,7 @@ fn event_loop(
                         } else if app.cancel_area.contains(position) {
                             app.cancel_delete();
                         }
+                    } else if app.activate_toolbar(position) {
                     } else if app.list_area.contains(position) {
                         if let Some(index) = app.index_at(mouse.row) {
                             app.selected = index;
@@ -506,10 +529,15 @@ fn char_to_byte_index(text: &str, char_index: usize) -> usize {
 
 fn render(frame: &mut ratatui::Frame, app: &mut App) {
     let search_mode = app.mode == Mode::Search;
-    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .split(frame.area());
 
     // 列表直接铺在终端背景上，没有边框、提示行和外框。
-    app.list_area = chunks[0];
+    app.list_area = chunks[1];
     app.clamp_scroll();
     let end = (app.scroll_offset + app.visible_height()).min(app.filtered.len());
     let top = app.list_top();
@@ -520,19 +548,58 @@ fn render(frame: &mut ratatui::Frame, app: &mut App) {
         let area = Rect {
             y: top + offset as u16,
             height: 1,
-            ..chunks[0]
+            ..chunks[1]
         };
         render_row(frame, app, command, area, selected, search_mode);
     }
 
+    render_toolbar(frame, app, chunks[0]);
     if search_mode {
-        render_prompt(frame, app, chunks[1]);
+        render_prompt(frame, app, chunks[2]);
     } else {
         if app.mode == Mode::Note {
             render_note_modal(frame, app);
         } else {
             render_delete_confirm(frame, app);
         }
+    }
+}
+
+fn render_toolbar(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    if area.width == 0 {
+        app.toolbar_note_area = Rect::default();
+        app.toolbar_delete_area = Rect::default();
+        return;
+    }
+
+    let note_width = text_width(TOOLBAR_NOTE).min(area.width);
+    app.toolbar_note_area = Rect {
+        width: note_width,
+        ..area
+    };
+
+    let delete_x = app.toolbar_note_area.right().saturating_add(TOOLBAR_GAP);
+    let delete_width = text_width(TOOLBAR_DELETE).min(area.right().saturating_sub(delete_x));
+    app.toolbar_delete_area = Rect {
+        x: delete_x,
+        width: delete_width,
+        ..area
+    };
+
+    let style = if app.mode == Mode::Search {
+        Style::default().fg(CHROME)
+    } else {
+        Style::default().fg(CHROME).add_modifier(Modifier::DIM)
+    };
+    frame.render_widget(
+        Paragraph::new(TOOLBAR_NOTE).style(style),
+        app.toolbar_note_area,
+    );
+    if app.toolbar_delete_area.width > 0 {
+        frame.render_widget(
+            Paragraph::new(TOOLBAR_DELETE).style(style),
+            app.toolbar_delete_area,
+        );
     }
 }
 
@@ -1066,7 +1133,7 @@ mod tests {
         let lines = screen(50, 8, "");
         // 测试数据按 Atuin 默认顺序排列：第一条最新。
         // 旧命令在上，最新命令紧贴输入行。
-        assert_eq!(lines[0], "".to_owned());
+        assert_eq!(lines[0], "备注  删除".to_owned());
         assert_eq!(
             lines[1],
             "atuin search --delete-it-all".to_owned(),
@@ -1090,6 +1157,35 @@ mod tests {
         // 过滤命中一条时仍靠底部显示，紧贴输入行。
         assert_eq!(lines[2], "atuin search --format json --limit 5".to_owned());
         assert!(lines[3].starts_with("❯ json"));
+    }
+
+    #[test]
+    fn toolbar_actions_follow_the_selected_command() {
+        let history = vec!["dir".to_owned()];
+        let mut notes = notes_for_test("toolbar-actions");
+        notes.set("dir", "list files").unwrap();
+        let mut app = App::new(&history, &mut notes, "");
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+
+        let note = Position {
+            x: app.toolbar_note_area.x,
+            y: app.toolbar_note_area.y,
+        };
+        assert!(app.activate_toolbar(note));
+        assert_eq!(app.mode, Mode::Note);
+        app.mode = Mode::Search;
+        app.note_command = None;
+
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let delete = Position {
+            x: app.toolbar_delete_area.x,
+            y: app.toolbar_delete_area.y,
+        };
+        assert!(app.activate_toolbar(delete));
+        assert_eq!(app.mode, Mode::DeleteConfirm);
+        assert_eq!(app.delete_command.as_deref(), Some("dir"));
+        remove_test_notes(&notes);
     }
 
     #[test]
