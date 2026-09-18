@@ -1,0 +1,35 @@
+mod app;
+mod history;
+mod notes;
+mod pick;
+mod shell_init;
+mod tui;
+
+use std::process::ExitCode;
+
+const USAGE: &str = "kc - Shell history notes and search
+
+Usage:
+  kc                      Start the TUI
+  kc pick --query QUERY   Start TUI for shell integration; emit one JSON result
+  kc init powershell      Print the PowerShell integration
+  kc init bash            Print the Bash/Termux integration
+  kc --help               Show this help
+";
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        None => app::run(None),
+        Some("--help") | Some("-h") => {
+            print!("{USAGE}");
+            ExitCode::SUCCESS
+        }
+        Some("init") => shell_init::print(args.get(1).map(String::as_str)),
+        Some("pick") => pick::main(&args[1..]),
+        Some(_) => {
+            eprintln!("未知命令。使用 kc --help 查看用法。");
+            ExitCode::from(2)
+        }
+    }
+}
