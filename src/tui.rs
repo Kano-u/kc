@@ -398,7 +398,9 @@ fn event_loop(
                         }
                     }
                     KeyCode::Left => app.enter_note_mode(),
-                    KeyCode::Backspace => app.request_delete(),
+                    KeyCode::Backspace if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                        app.request_delete();
+                    }
                     KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                         app.notice = None;
                         app.query.push(character);
