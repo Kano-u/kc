@@ -39,9 +39,8 @@ impl NoteStore {
             if line.trim().is_empty() {
                 continue;
             }
-            let note: Note = serde_json::from_str(line).map_err(|error| {
-                format!("备注文件第 {} 行解析失败: {error}", line_number + 1)
-            })?;
+            let note: Note = serde_json::from_str(line)
+                .map_err(|error| format!("备注文件第 {} 行解析失败: {error}", line_number + 1))?;
             match seen.get(&note.command) {
                 Some(index) => notes[*index] = note,
                 None => {
@@ -66,11 +65,7 @@ impl NoteStore {
 
     pub fn set(&mut self, command: &str, note: &str) -> Result<(), String> {
         let now = now();
-        if let Some(existing) = self
-            .notes
-            .iter_mut()
-            .find(|item| item.command == command)
-        {
+        if let Some(existing) = self.notes.iter_mut().find(|item| item.command == command) {
             existing.note = note.to_owned();
             existing.updated_at = now;
         } else {
@@ -94,6 +89,11 @@ impl NoteStore {
     pub fn len(&self) -> usize {
         self.notes.len()
     }
+
+    #[cfg(test)]
+    pub fn path_for_test(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
 }
 
 fn now() -> String {
@@ -110,9 +110,8 @@ fn save_to(path: &Path, notes: &[Note]) -> Result<(), String> {
 
     let temp_path = path.with_extension("jsonl.tmp");
     {
-        let file = fs::File::create(&temp_path).map_err(|error| {
-            format!("创建临时备注文件失败: {}: {error}", temp_path.display())
-        })?;
+        let file = fs::File::create(&temp_path)
+            .map_err(|error| format!("创建临时备注文件失败: {}: {error}", temp_path.display()))?;
         let mut writer = BufWriter::new(file);
         for note in notes {
             serde_json::to_writer(&mut writer, note)

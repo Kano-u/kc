@@ -28,6 +28,27 @@ const NOTE_SAVE_HINT: &str = "↵ 保存";
 const PLACEHOLDER: &str = "输入命令或备注";
 const CURSOR: &str = "❯ ";
 
+fn split_query(query: &str) -> (bool, &str) {
+    match query.strip_prefix(' ') {
+        Some(query) => (true, query),
+        None => (false, query),
+    }
+}
+
+fn matches_query(command: &str, note: Option<&str>, query: &str, notes_only: bool) -> bool {
+    if notes_only && note.is_none_or(|note| note.is_empty()) {
+        return false;
+    }
+
+    query.is_empty()
+        || command.to_lowercase().contains(query)
+        || note.is_some_and(|note| note.to_lowercase().contains(query))
+}
+
+fn delete_history(command: &str) -> Result<(), String> {
+    crate::history::delete_history(command)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PickAction {
@@ -56,10 +77,17 @@ impl PickResult {
 enum Mode {
     Search,
     Note,
+    DeleteConfirm,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DeleteRequest {
+    Immediate(String),
+    Confirm(String),
 }
 
 struct App<'a> {
-    history: &'a [String],
+    history: Vec<String>,
     notes: &'a mut NoteStore,
     filtered: Vec<String>,
     selected: usize,
@@ -71,12 +99,16 @@ struct App<'a> {
     note_command: Option<String>,
     list_area: Rect,
     save_area: Rect,
+    delete_command: Option<String>,
+    confirm_area: Rect,
+    cancel_area: Rect,
+    notice: Option<String>,
 }
 
 impl<'a> App<'a> {
     fn new(history: &'a [String], notes: &'a mut NoteStore, query: &str) -> Self {
         let mut app = Self {
-            history,
+            history: history.to_vec(),
             notes,
             filtered: Vec::new(),
             selected: 0,
@@ -88,24 +120,22 @@ impl<'a> App<'a> {
             note_command: None,
             list_area: Rect::default(),
             save_area: Rect::default(),
+            delete_command: None,
+            confirm_area: Rect::default(),
+            cancel_area: Rect::default(),
+            notice: None,
         };
         app.refresh();
         app
     }
 
     fn refresh(&mut self) {
-        let query = self.query.to_lowercase();
+        let (notes_only, raw_query) = split_query(&self.query);
+        let query = raw_query.to_lowercase();
         self.filtered = self
             .history
             .iter()
-            .filter(|command| {
-                query.is_empty()
-                    || command.to_lowercase().contains(&query)
-                    || self
-                        .notes
-                        .get(command)
-                        .is_some_and(|note| note.to_lowercase().contains(&query))
-            })
+            .filter(|command| matches_query(command, self.notes.get(command), &query, notes_only))
             .cloned()
             .rev()
             .collect();
@@ -173,6 +203,54 @@ impl<'a> App<'a> {
 
     fn selected_command(&self) -> Option<&str> {
         self.filtered.get(self.selected).map(String::as_str)
+    }
+
+    fn delete_request(&self) -> Option<DeleteRequest> {
+        let command = self.selected_command()?.to_owned();
+        if self
+            .notes
+            .get(&command)
+            .is_some_and(|note| !note.is_empty())
+        {
+            Some(DeleteRequest::Confirm(command))
+        } else {
+            Some(DeleteRequest::Immediate(command))
+        }
+    }
+
+    fn request_delete(&mut self) {
+        self.notice = None;
+        match self.delete_request() {
+            Some(DeleteRequest::Immediate(command)) => self.delete_now(&command),
+            Some(DeleteRequest::Confirm(command)) => {
+                self.delete_command = Some(command);
+                self.mode = Mode::DeleteConfirm;
+            }
+            None => {}
+        }
+    }
+
+    fn confirm_delete(&mut self) {
+        if let Some(command) = self.delete_command.take() {
+            self.delete_now(&command);
+        }
+        self.mode = Mode::Search;
+    }
+
+    fn cancel_delete(&mut self) {
+        self.delete_command = None;
+        self.mode = Mode::Search;
+    }
+
+    fn delete_now(&mut self, command: &str) {
+        match delete_history(command) {
+            Ok(()) => {
+                self.history.retain(|item| item != command);
+                self.notice = None;
+                self.refresh();
+            }
+            Err(error) => self.notice = Some(error),
+        }
     }
 
     fn enter_note_mode(&mut self) {
@@ -258,11 +336,9 @@ fn event_loop(
                         }
                     }
                     KeyCode::Left => app.enter_note_mode(),
-                    KeyCode::Backspace => {
-                        app.query.pop();
-                        app.refresh();
-                    }
+                    KeyCode::Backspace => app.request_delete(),
                     KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        app.notice = None;
                         app.query.push(character);
                         app.refresh();
                     }
@@ -303,6 +379,14 @@ fn event_loop(
                     }
                     _ => {}
                 },
+                Mode::DeleteConfirm => match key.code {
+                    KeyCode::Enter => app.confirm_delete(),
+                    KeyCode::Esc => app.cancel_delete(),
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(PickResult::cancel());
+                    }
+                    _ => {}
+                },
             },
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::ScrollUp if app.mode == Mode::Search => app.move_selection(-1),
@@ -315,6 +399,12 @@ fn event_loop(
                     if app.mode == Mode::Note {
                         if app.save_area.contains(position) {
                             app.save_note();
+                        }
+                    } else if app.mode == Mode::DeleteConfirm {
+                        if app.confirm_area.contains(position) {
+                            app.confirm_delete();
+                        } else if app.cancel_area.contains(position) {
+                            app.cancel_delete();
                         }
                     } else if app.list_area.contains(position) {
                         if let Some(index) = app.index_at(mouse.row) {
@@ -361,7 +451,11 @@ fn render(frame: &mut ratatui::Frame, app: &mut App) {
     if search_mode {
         render_prompt(frame, app, chunks[1]);
     } else {
-        render_note_modal(frame, app);
+        if app.mode == Mode::Note {
+            render_note_modal(frame, app);
+        } else {
+            render_delete_confirm(frame, app);
+        }
     }
 }
 
@@ -397,7 +491,15 @@ fn render_row(
 }
 
 fn render_prompt(frame: &mut ratatui::Frame, app: &App, area: Rect) {
-    let counter = format!("{} / {}", app.filtered.len(), app.history.len());
+    let counter = app
+        .notice
+        .clone()
+        .unwrap_or_else(|| format!("{} / {}", app.filtered.len(), app.history.len()));
+    let counter_style = if app.notice.is_some() {
+        Style::default().fg(Color::Red)
+    } else {
+        Style::default().fg(CHROME)
+    };
     let counter_width = text_width(&counter);
     let show_counter = area.width > counter_width + 16;
     let prompt_area = Rect {
@@ -442,8 +544,7 @@ fn render_prompt(frame: &mut ratatui::Frame, app: &App, area: Rect) {
 
     if show_counter {
         frame.render_widget(
-            Line::from(Span::styled(counter, Style::default().fg(CHROME)))
-                .alignment(Alignment::Right),
+            Line::from(Span::styled(counter, counter_style)).alignment(Alignment::Right),
             Rect {
                 x: area.right() - counter_width,
                 width: counter_width,
@@ -505,6 +606,69 @@ fn render_note_modal(frame: &mut ratatui::Frame, app: &mut App) {
             .alignment(Alignment::Right)
             .style(Style::default().fg(CHROME)),
         rows[3],
+    );
+}
+
+fn render_delete_confirm(frame: &mut ratatui::Frame, app: &mut App) {
+    let modal = centered_modal(frame.area());
+    if modal.width < 24 || modal.height < 6 {
+        return;
+    }
+    frame.render_widget(Clear, modal);
+    frame.render_widget(
+        Block::bordered()
+            .border_type(BorderType::Plain)
+            .border_style(Style::default().fg(CHROME))
+            .title(Span::styled(" 删除历史 ", Style::default().fg(CHROME))),
+        modal,
+    );
+
+    let inner = modal.inner(Margin::new(2, 1));
+    if inner.width == 0 || inner.height < 4 {
+        return;
+    }
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    frame.render_widget(
+        Paragraph::new("确定删除这条历史记录？")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(CHROME)),
+        rows[0],
+    );
+    let command = app.delete_command.clone().unwrap_or_default();
+    frame.render_widget(
+        Paragraph::new(clip_left(&command, rows[1].width)).style(Style::default().fg(CHROME)),
+        rows[1],
+    );
+
+    if let Some(note) = app.notes.get(&command).filter(|note| !note.is_empty()) {
+        frame.render_widget(
+            Paragraph::new(format!("备注：{note}")).style(Style::default().fg(CHROME)),
+            rows[2],
+        );
+    }
+
+    let buttons =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[3]);
+    app.cancel_area = buttons[0];
+    app.confirm_area = buttons[1];
+    frame.render_widget(
+        Paragraph::new("取消")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(CHROME)),
+        app.cancel_area,
+    );
+    frame.render_widget(
+        Paragraph::new("确定")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(COMMAND)),
+        app.confirm_area,
     );
 }
 
@@ -677,6 +841,113 @@ mod tests {
         assert_eq!(visible_note("hello", 5, 10), ("hello".to_owned(), 5));
         assert_eq!(visible_note("hello", 5, 3), ("lo".to_owned(), 2));
         assert_eq!(visible_note("hello", 1, 3), ("hel".to_owned(), 1));
+    }
+
+    fn notes_for_test(name: &str) -> NoteStore {
+        let path =
+            std::env::temp_dir().join(format!("kc-tui-notes-{name}-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        NoteStore::load_from(&path).unwrap()
+    }
+
+    fn remove_test_notes(notes: &NoteStore) {
+        if let Some(path) = notes.path_for_test() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn leading_space_filters_to_commands_with_notes() {
+        let history = vec![
+            "scoop install".to_owned(),
+            "dir".to_owned(),
+            "git status".to_owned(),
+        ];
+        let mut notes = notes_for_test("notes-only");
+        notes.set("scoop install", "install package").unwrap();
+        notes.set("git status", "check repo").unwrap();
+
+        let app = App::new(&history, &mut notes, " ");
+        assert_eq!(app.filtered, vec!["git status", "scoop install"]);
+        remove_test_notes(&notes);
+    }
+
+    #[test]
+    fn leading_space_keeps_search_after_the_space() {
+        let history = vec![
+            "scoop install".to_owned(),
+            "scoop search".to_owned(),
+            "dir".to_owned(),
+        ];
+        let mut notes = notes_for_test("space-query");
+        notes.set("scoop install", "install package").unwrap();
+        notes.set("dir", "list files").unwrap();
+
+        let app = App::new(&history, &mut notes, " scoop");
+        assert_eq!(app.filtered, vec!["scoop install"]);
+        remove_test_notes(&notes);
+    }
+
+    #[test]
+    fn ordinary_search_does_not_require_a_note() {
+        let history = vec!["scoop install".to_owned(), "dir".to_owned()];
+        let mut notes = notes_for_test("ordinary-query");
+        notes.set("dir", "list files").unwrap();
+
+        let app = App::new(&history, &mut notes, "scoop");
+        assert_eq!(app.filtered, vec!["scoop install"]);
+        remove_test_notes(&notes);
+    }
+
+    #[test]
+    fn deleting_an_unnoted_command_does_not_ask_for_confirmation() {
+        let history = vec!["dir".to_owned(), "ls".to_owned()];
+        let mut notes = NoteStore::default();
+        let app = App::new(&history, &mut notes, "dir");
+
+        assert_eq!(
+            app.delete_request(),
+            Some(DeleteRequest::Immediate("dir".to_owned()))
+        );
+    }
+
+    #[test]
+    fn deleting_a_noted_command_requires_confirmation() {
+        let history = vec!["dir".to_owned(), "ls".to_owned()];
+        let mut notes = notes_for_test("delete-confirm");
+        notes.set("dir", "list files").unwrap();
+        let mut app = App::new(&history, &mut notes, "dir");
+
+        app.request_delete();
+        assert_eq!(app.mode, Mode::DeleteConfirm);
+        assert_eq!(app.delete_command.as_deref(), Some("dir"));
+        app.cancel_delete();
+        assert_eq!(app.mode, Mode::Search);
+        assert!(app.delete_command.is_none());
+        remove_test_notes(&notes);
+    }
+
+    #[test]
+    fn renders_delete_confirmation_for_noted_command() {
+        let history = vec!["dir".to_owned()];
+        let mut notes = notes_for_test("delete-modal");
+        notes.set("dir", "list files").unwrap();
+        let mut app = App::new(&history, &mut notes, "");
+        app.request_delete();
+
+        let mut terminal = Terminal::new(TestBackend::new(50, 10)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        let compact: String = text.split_whitespace().collect();
+        assert!(compact.contains("确定删除这条历史记录？"), "{text}");
+        assert!(compact.contains("取消确定"), "{text}");
+        remove_test_notes(&notes);
     }
 
     fn screen(width: u16, height: u16, query: &str) -> Vec<String> {

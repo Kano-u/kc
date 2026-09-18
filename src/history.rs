@@ -50,6 +50,56 @@ pub fn load_history(limit: u32) -> Result<Vec<String>, String> {
     Ok(history)
 }
 
+fn escape_regex(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$' => {
+                escaped.push('\\');
+                escaped.push(character);
+            }
+            // Avoid terminating Atuin's r/.../ query at a slash in the command.
+            '/' => escaped.push_str("\\x2f"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn delete_query(command: &str) -> String {
+    format!("r/^{}$/", escape_regex(command))
+}
+
+fn delete_args(command: &str) -> Vec<String> {
+    vec![
+        "search".to_owned(),
+        "--delete".to_owned(),
+        "--search-mode".to_owned(),
+        "fulltext".to_owned(),
+        "--".to_owned(),
+        delete_query(command),
+    ]
+}
+
+pub fn delete_history(command: &str) -> Result<(), String> {
+    let output = Command::new("atuin")
+        .args(delete_args(command))
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("无法启动 Atuin: {error}"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    Err(if message.is_empty() {
+        "Atuin 删除历史失败。".to_owned()
+    } else {
+        format!("Atuin 删除历史失败: {message}")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,6 +140,29 @@ mod tests {
     #[test]
     fn trims_and_skips_empty_entries() {
         assert!(parse_history(b"  \0\0").is_empty());
+    }
+
+    #[test]
+    fn escapes_regex_metacharacters_for_exact_delete() {
+        assert_eq!(
+            delete_query("echo [$HOME] /tmp"),
+            "r/^echo \\[\\$HOME\\] \\x2ftmp$/".to_owned()
+        );
+    }
+
+    #[test]
+    fn delete_args_use_fulltext_regex_search() {
+        assert_eq!(
+            delete_args("dir"),
+            vec![
+                "search".to_owned(),
+                "--delete".to_owned(),
+                "--search-mode".to_owned(),
+                "fulltext".to_owned(),
+                "--".to_owned(),
+                "r/^dir$/".to_owned(),
+            ]
+        );
     }
 }
 

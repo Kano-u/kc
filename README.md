@@ -11,11 +11,32 @@
 - `←` 编辑选中命令备注
 - 鼠标/触摸：点击选择、滚轮滚动、点击保存
 - 备注保存在 `~/.config/kc/data/notes.jsonl`
+- `Backspace` 删除选中命令的 Atuin 历史；无备注直接删除，有备注需确认
+- 输入以空格开头时只搜索有备注的命令，空格后的文字参与匹配
+- 鼠标/触摸：点击选择、滚轮滚动、点击保存或确认
+- 备注保存在 `~/.config/kc/data/notes.jsonl`
 
 ## 安装
 
 ```powershell
 cargo install --path .
+```
+
+## 从 Git Clone 安装
+
+先在系统中安装 `git`、Rust 工具链和 Atuin。然后：
+
+```bash
+git clone https://github.com/Kano-u/kc.git
+cd kc
+cargo install --path .
+```
+
+更新时重新拉取并强制安装：
+
+```bash
+git pull
+cargo install --path . --force
 ```
 
 ## PowerShell 集成
