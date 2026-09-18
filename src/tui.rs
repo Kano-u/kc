@@ -20,9 +20,9 @@ use std::io::Stdout;
 
 /// 界面装饰只使用暗灰，彩色留给命令本身。
 const CHROME: Color = Color::DarkGray;
-const COMMAND: Color = Color::Green;
-const OPTION: Color = Color::Blue;
-const MARKER: Color = Color::Green;
+const COMMAND: Color = Color::Rgb(0x16, 0xc6, 0x0c);
+const OPTION: Color = Color::Rgb(0x3a, 0x96, 0xdd);
+const MARKER: Color = COMMAND;
 
 const NOTE_SAVE_HINT: &str = "↵ 保存";
 const PLACEHOLDER: &str = "输入命令或备注";
@@ -140,6 +140,15 @@ impl<'a> App<'a> {
         self.clamp_scroll();
     }
 
+    /// Returns false when Down moves past the newest command and should exit.
+    fn move_down(&mut self) -> bool {
+        if self.filtered.is_empty() || self.selected + 1 >= self.filtered.len() {
+            return false;
+        }
+        self.move_selection(1);
+        true
+    }
+
     /// 列表底部对齐，让最新命令贴着输入行显示。
     fn list_top(&self) -> u16 {
         if self.list_area.height == 0 {
@@ -228,7 +237,8 @@ fn event_loop(
             Event::Key(key) if key.kind == KeyEventKind::Press => match app.mode {
                 Mode::Search => match key.code {
                     KeyCode::Up => app.move_selection(-1),
-                    KeyCode::Down => app.move_selection(1),
+                    KeyCode::Down if !app.move_down() => return Ok(PickResult::cancel()),
+                    KeyCode::Down => {}
                     KeyCode::PageUp => app.move_selection(-(app.visible_height() as isize)),
                     KeyCode::PageDown => app.move_selection(app.visible_height() as isize),
                     KeyCode::Enter => {
@@ -618,6 +628,12 @@ mod tests {
     }
 
     #[test]
+    fn uses_the_configured_command_and_option_colors() {
+        assert_eq!(COMMAND, Color::Rgb(0x16, 0xc6, 0x0c));
+        assert_eq!(OPTION, Color::Rgb(0x3a, 0x96, 0xdd));
+    }
+
+    #[test]
     fn colors_program_name_and_options() {
         let spans = rendered("atuin search --format json --limit 5");
         assert_eq!(spans[0].0, "atuin");
@@ -734,6 +750,27 @@ mod tests {
         let mut notes = NoteStore::default();
         let app = App::new(&history, &mut notes, "");
         assert_eq!(app.filtered, vec!["older", "newest"]);
+        assert_eq!(app.selected_command(), Some("newest"));
+    }
+
+    #[test]
+    fn down_from_the_newest_command_requests_exit() {
+        let history = vec!["newest".to_owned(), "older".to_owned()];
+        let mut notes = NoteStore::default();
+        let mut app = App::new(&history, &mut notes, "");
+        assert_eq!(app.selected_command(), Some("newest"));
+        assert!(!app.move_down());
+        assert_eq!(app.selected_command(), Some("newest"));
+    }
+
+    #[test]
+    fn down_from_an_older_command_moves_toward_the_newest() {
+        let history = vec!["newest".to_owned(), "older".to_owned()];
+        let mut notes = NoteStore::default();
+        let mut app = App::new(&history, &mut notes, "");
+        app.move_selection(-1);
+        assert_eq!(app.selected_command(), Some("older"));
+        assert!(app.move_down());
         assert_eq!(app.selected_command(), Some("newest"));
     }
     #[test]

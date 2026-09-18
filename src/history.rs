@@ -1,7 +1,23 @@
 use std::collections::HashSet;
 use std::process::{Command, Stdio};
 
+/// Atuin's `history list` defaults to oldest first. Ask for newest first so
+/// truncation and de-duplication keep the most recent occurrence of a command.
+fn history_args() -> [&'static str; 6] {
+    [
+        "history",
+        "list",
+        "--cmd-only",
+        "--print0",
+        "--reverse",
+        "false",
+    ]
+}
+
 /// Atuin prints one NUL-terminated command per entry with `--print0`.
+///
+/// Duplicate commands are kept at their first position. Since `load_history`
+/// requests newest-first output, that position is the most recent occurrence.
 pub fn parse_history(raw: &[u8]) -> Vec<String> {
     let mut seen = HashSet::new();
     raw.split(|byte| *byte == 0)
@@ -15,7 +31,7 @@ pub fn parse_history(raw: &[u8]) -> Vec<String> {
 
 pub fn load_history(limit: u32) -> Result<Vec<String>, String> {
     let output = Command::new("atuin")
-        .args(["history", "list", "--cmd-only", "--print0"])
+        .args(history_args())
         .stdin(Stdio::null())
         .output()
         .map_err(|error| format!("无法启动 Atuin: {error}"))?;
@@ -39,11 +55,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn requests_history_newest_first() {
+        assert_eq!(
+            history_args(),
+            [
+                "history",
+                "list",
+                "--cmd-only",
+                "--print0",
+                "--reverse",
+                "false"
+            ]
+        );
+    }
+
+    #[test]
     fn parses_and_deduplicates_history() {
         let raw = b"cargo test\0git status\0cargo test\0npm run dev\0\0";
         assert_eq!(
             parse_history(raw),
             vec!["cargo test", "git status", "npm run dev"]
+        );
+    }
+
+    #[test]
+    fn keeps_the_newest_duplicate_first() {
+        let raw = b"latest dir\0older dir\0latest dir\0old command\0";
+        assert_eq!(
+            parse_history(raw),
+            vec!["latest dir", "older dir", "old command"]
         );
     }
 
