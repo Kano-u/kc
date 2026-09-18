@@ -98,6 +98,7 @@ struct DeleteJob {
     command: String,
     history_index: usize,
     filtered_index: usize,
+    scroll_offset: usize,
 }
 
 struct DeleteOutcome {
@@ -273,10 +274,12 @@ impl<'a> App<'a> {
     fn start_delete(&mut self, command: &str) {
         if let Some(history_index) = self.history.iter().position(|item| item == command) {
             let filtered_index = self.selected;
+            let scroll_offset = self.scroll_offset;
             let job = DeleteJob {
                 command: command.to_owned(),
                 history_index,
                 filtered_index,
+                scroll_offset,
             };
             self.remove_local(&job);
             spawn_delete(job, self.delete_sender.clone());
@@ -285,10 +288,14 @@ impl<'a> App<'a> {
 
     fn remove_local(&mut self, job: &DeleteJob) {
         self.history.remove(job.history_index);
+        let had_previous = job.filtered_index > 0;
         self.rebuild_filtered();
-        self.selected = job
-            .filtered_index
-            .min(self.filtered.len().saturating_sub(1));
+        self.selected = if had_previous {
+            (job.filtered_index - 1).min(self.filtered.len().saturating_sub(1))
+        } else {
+            0
+        };
+        self.scroll_offset = job.scroll_offset.min(self.selected);
         self.clamp_scroll();
     }
 
@@ -297,10 +304,8 @@ impl<'a> App<'a> {
             let index = outcome.job.history_index.min(self.history.len());
             self.history.insert(index, outcome.job.command);
             self.rebuild_filtered();
-            self.selected = outcome
-                .job
-                .filtered_index
-                .min(self.filtered.len().saturating_sub(1));
+            self.selected = outcome.job.filtered_index;
+            self.scroll_offset = outcome.job.scroll_offset;
             self.clamp_scroll();
             self.notice = Some(error);
         }
@@ -1119,14 +1124,17 @@ mod tests {
         let mut app = App::new(&history, &mut notes, "");
         assert_eq!(app.filtered, vec!["oldest", "middle", "newest"]);
         app.selected = 1;
+        app.scroll_offset = 1;
         app.remove_local(&DeleteJob {
             command: "middle".to_owned(),
             history_index: 1,
             filtered_index: 1,
+            scroll_offset: 1,
         });
         assert_eq!(app.filtered, vec!["oldest", "newest"]);
-        assert_eq!(app.selected, 1);
-        assert_eq!(app.selected_command(), Some("newest"));
+        assert_eq!(app.selected, 0);
+        assert_eq!(app.selected_command(), Some("oldest"));
+        assert_eq!(app.scroll_offset, 0);
     }
 
     #[test]
@@ -1143,6 +1151,7 @@ mod tests {
             command: "newest".to_owned(),
             history_index: 0,
             filtered_index: 2,
+            scroll_offset: 0,
         });
         assert_eq!(app.filtered, vec!["oldest", "middle"]);
         assert_eq!(app.selected_command(), Some("middle"));
@@ -1163,6 +1172,7 @@ mod tests {
             command: "oldest".to_owned(),
             history_index: 2,
             filtered_index: 0,
+            scroll_offset: 0,
         });
         assert_eq!(app.selected_command(), Some("middle"));
     }
@@ -1177,10 +1187,12 @@ mod tests {
         let mut notes = NoteStore::default();
         let mut app = App::new(&history, &mut notes, "");
         app.selected = 1;
+        app.scroll_offset = 1;
         let job = DeleteJob {
             command: "middle".to_owned(),
             history_index: 1,
             filtered_index: 1,
+            scroll_offset: 1,
         };
         app.remove_local(&job);
         app.finish_delete(DeleteOutcome {
@@ -1189,6 +1201,7 @@ mod tests {
         });
         assert_eq!(app.filtered, vec!["oldest", "middle", "newest"]);
         assert_eq!(app.selected_command(), Some("middle"));
+        assert_eq!(app.scroll_offset, 1);
         assert!(app.notice.is_some());
     }
     #[test]
