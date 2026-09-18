@@ -63,6 +63,19 @@ eval "$(kc init bash)"
 history_limit = 5000
 ```
 
+`filter` 是排除规则列表，匹配任一正则的命令会从列表中隐藏。正则默认不是完全匹配，若要完整匹配整条命令，请加上 `^` 和 `$`：
+
+```toml
+history_limit = 5000
+filter = [
+  "^dir$",
+  "^ls -la$",
+  "secret",
+]
+```
+
+上面的 `^dir$` 和 `^ls -la$` 只过滤完全相同的命令；`secret` 会过滤任何包含该文字的命令。
+
 ## 开发检查
 
 ```powershell

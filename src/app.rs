@@ -1,6 +1,7 @@
 use crate::history::load_history;
 use crate::notes::NoteStore;
 use crate::tui;
+use regex::Regex;
 use std::path::PathBuf;
 
 fn home_dir() -> PathBuf {
@@ -38,11 +39,15 @@ pub fn config_path() -> PathBuf {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub history_limit: u32,
+    pub filters: Vec<Regex>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { history_limit: 5000 }
+        Self {
+            history_limit: 5000,
+            filters: Vec::new(),
+        }
     }
 }
 
@@ -64,14 +69,33 @@ impl Config {
                 .and_then(|value| value.as_integer())
                 .and_then(|value| u32::try_from(value).ok())
                 .unwrap_or(5000),
+            filters: parse_filters(value.get("filter")),
         }
     }
+}
+
+fn parse_filters(value: Option<&toml::Value>) -> Vec<Regex> {
+    let Some(values) = value.and_then(toml::Value::as_array) else {
+        return Vec::new();
+    };
+
+    values
+        .iter()
+        .filter_map(|value| value.as_str())
+        .filter_map(|pattern| match Regex::new(pattern) {
+            Ok(regex) => Some(regex),
+            Err(error) => {
+                eprintln!("忽略无效的过滤正则 {pattern:?}: {error}");
+                None
+            }
+        })
+        .collect()
 }
 
 pub fn run(query: Option<&str>) -> std::process::ExitCode {
     let config = Config::load();
     let query = query.unwrap_or_default();
-    let history = match load_history(config.history_limit) {
+    let history = match load_history(config.history_limit, &config.filters) {
         Ok(history) => history,
         Err(error) => {
             eprintln!("{error}");
@@ -92,5 +116,27 @@ pub fn run(query: Option<&str>) -> std::process::ExitCode {
             eprintln!("{error}");
             std::process::ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_regex_filter_list() {
+        let value: toml::Value =
+            toml::from_str(r#"filter = ["^dir$", "secret", "[invalid"]"#).unwrap();
+        let filters = parse_filters(value.get("filter"));
+        assert_eq!(filters.len(), 2);
+        assert!(filters[0].is_match("dir"));
+        assert!(!filters[0].is_match("dirty"));
+        assert!(filters[1].is_match("echo secret"));
+    }
+
+    #[test]
+    fn missing_filter_list_is_empty() {
+        let value: toml::Value = toml::from_str("history_limit = 10").unwrap();
+        assert!(parse_filters(value.get("filter")).is_empty());
     }
 }

@@ -1,3 +1,4 @@
+use regex::Regex;
 use std::collections::HashSet;
 use std::process::{Command, Stdio};
 
@@ -29,7 +30,7 @@ pub fn parse_history(raw: &[u8]) -> Vec<String> {
         .collect()
 }
 
-pub fn load_history(limit: u32) -> Result<Vec<String>, String> {
+pub fn load_history(limit: u32, filters: &[Regex]) -> Result<Vec<String>, String> {
     let output = Command::new("atuin")
         .args(history_args())
         .stdin(Stdio::null())
@@ -46,8 +47,13 @@ pub fn load_history(limit: u32) -> Result<Vec<String>, String> {
     }
 
     let mut history = parse_history(&output.stdout);
+    filter_history(&mut history, filters);
     history.truncate(limit as usize);
     Ok(history)
+}
+
+fn filter_history(history: &mut Vec<String>, filters: &[Regex]) {
+    history.retain(|command| !filters.iter().any(|regex| regex.is_match(command)));
 }
 
 fn escape_regex(text: &str) -> String {
@@ -143,6 +149,34 @@ mod tests {
     }
 
     #[test]
+    fn filters_commands_matching_configured_regexes() {
+        let mut history = vec![
+            "git status".to_owned(),
+            "cargo test".to_owned(),
+            "cargo test --all".to_owned(),
+            "ls".to_owned(),
+        ];
+        let filters = vec![Regex::new("^cargo test$").unwrap()];
+        filter_history(&mut history, &filters);
+        assert_eq!(history, vec!["git status", "cargo test --all", "ls"]);
+    }
+
+    #[test]
+    fn unanchored_regex_filters_substrings() {
+        let mut history = vec!["git status".to_owned(), "echo secret".to_owned()];
+        let filters = vec![Regex::new("secret").unwrap()];
+        filter_history(&mut history, &filters);
+        assert_eq!(history, vec!["git status"]);
+    }
+
+    #[test]
+    fn empty_filter_list_keeps_everything() {
+        let mut history = vec!["dir".to_owned()];
+        filter_history(&mut history, &[]);
+        assert_eq!(history, vec!["dir"]);
+    }
+
+    #[test]
     fn escapes_regex_metacharacters_for_exact_delete() {
         assert_eq!(
             delete_query("echo [$HOME] /tmp"),
@@ -188,7 +222,7 @@ mod unix_tests {
             paths.extend(std::env::split_paths(old_path));
         }
         std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
-        let result = load_history(10).unwrap();
+        let result = load_history(10, &[]).unwrap();
         match old_path {
             Some(value) => std::env::set_var("PATH", value),
             None => std::env::remove_var("PATH"),
