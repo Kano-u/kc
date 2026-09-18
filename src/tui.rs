@@ -9,14 +9,24 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Layout, Position, Rect},
+    layout::{Alignment, Constraint, Layout, Margin, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Clear, List, ListItem, ListState, Paragraph},
+    widgets::{Block, BorderType, Clear, Paragraph},
     Terminal,
 };
 use serde::Serialize;
 use std::io::Stdout;
+
+/// 界面装饰只使用暗灰，彩色留给命令本身。
+const CHROME: Color = Color::DarkGray;
+const COMMAND: Color = Color::Green;
+const OPTION: Color = Color::Blue;
+const MARKER: Color = Color::Green;
+
+const NOTE_SAVE_HINT: &str = "↵ 保存";
+const PLACEHOLDER: &str = "输入命令或备注";
+const CURSOR: &str = "❯ ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -97,13 +107,19 @@ impl<'a> App<'a> {
                         .is_some_and(|note| note.to_lowercase().contains(&query))
             })
             .cloned()
+            .rev()
             .collect();
-        self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
-        self.clamp_scroll();
+        // 旧命令在上、最新命令在下；默认选中最新的一条。
+        self.selected = self.filtered.len().saturating_sub(1);
+        self.scroll_offset = 0;
+        // 首次构建时列表尺寸还没确定，等渲染阶段拿到真实高度后再校正。
+        if self.list_area.height > 0 {
+            self.clamp_scroll();
+        }
     }
 
     fn visible_height(&self) -> usize {
-        self.list_area.height.saturating_sub(2).max(1) as usize
+        self.list_area.height.max(1) as usize
     }
 
     fn clamp_scroll(&mut self) {
@@ -122,6 +138,28 @@ impl<'a> App<'a> {
         let next = self.selected as isize + delta;
         self.selected = next.clamp(0, self.filtered.len() as isize - 1) as usize;
         self.clamp_scroll();
+    }
+
+    /// 列表底部对齐，让最新命令贴着输入行显示。
+    fn list_top(&self) -> u16 {
+        if self.list_area.height == 0 {
+            return self.list_area.y;
+        }
+        let visible = self
+            .filtered
+            .len()
+            .saturating_sub(self.scroll_offset)
+            .min(self.visible_height()) as u16;
+        self.list_area.bottom().saturating_sub(visible)
+    }
+
+    fn index_at(&self, row: u16) -> Option<usize> {
+        let top = self.list_top();
+        if row < top {
+            return None;
+        }
+        let index = self.scroll_offset + usize::from(row - top);
+        (index < self.filtered.len()).then_some(index)
     }
 
     fn selected_command(&self) -> Option<&str> {
@@ -212,14 +250,10 @@ fn event_loop(
                     KeyCode::Left => app.enter_note_mode(),
                     KeyCode::Backspace => {
                         app.query.pop();
-                        app.selected = 0;
-                        app.scroll_offset = 0;
                         app.refresh();
                     }
                     KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                         app.query.push(character);
-                        app.selected = 0;
-                        app.scroll_offset = 0;
                         app.refresh();
                     }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -261,8 +295,8 @@ fn event_loop(
                 },
             },
             Event::Mouse(mouse) => match mouse.kind {
-                MouseEventKind::ScrollUp => app.move_selection(-1),
-                MouseEventKind::ScrollDown => app.move_selection(1),
+                MouseEventKind::ScrollUp if app.mode == Mode::Search => app.move_selection(-1),
+                MouseEventKind::ScrollDown if app.mode == Mode::Search => app.move_selection(1),
                 MouseEventKind::Down(MouseButton::Left) => {
                     let position = Position {
                         x: mouse.column,
@@ -273,9 +307,7 @@ fn event_loop(
                             app.save_note();
                         }
                     } else if app.list_area.contains(position) {
-                        let row = mouse.row.saturating_sub(app.list_area.y + 1) as usize;
-                        let index = app.scroll_offset + row;
-                        if index < app.filtered.len() {
+                        if let Some(index) = app.index_at(mouse.row) {
                             app.selected = index;
                             app.clamp_scroll();
                         }
@@ -296,125 +328,447 @@ fn char_to_byte_index(text: &str, char_index: usize) -> usize {
 }
 
 fn render(frame: &mut ratatui::Frame, app: &mut App) {
-    let chunks = Layout::vertical([
-        Constraint::Length(3),
-        Constraint::Min(1),
-        Constraint::Length(3),
-    ])
-    .split(frame.area());
+    let search_mode = app.mode == Mode::Search;
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
 
-    let title = if app.mode == Mode::Note {
-        "备注"
-    } else {
-        "历史"
-    };
-
-    let help = if app.mode == Mode::Note {
-        "Enter 保存  Esc 取消"
-    } else {
-        "↑↓ 选择  Enter 执行  Tab/→ 插入  ← 备注  Esc 退出"
-    };
-
-    frame.render_widget(
-        Paragraph::new(help)
-            .block(Block::bordered().title(title))
-            .alignment(Alignment::Left),
-        chunks[0],
-    );
-
-    let visible_height = chunks[1].height.saturating_sub(2).max(1) as usize;
-    app.list_area = chunks[1];
+    // 列表直接铺在终端背景上，没有边框、提示行和外框。
+    app.list_area = chunks[0];
     app.clamp_scroll();
-    let end = (app.scroll_offset + visible_height).min(app.filtered.len());
-    let items: Vec<ListItem> = app.filtered[app.scroll_offset..end]
-        .iter()
-        .map(|command| {
-            let note = app.notes.get(command);
-            let content = match note {
-                Some(note) if !note.is_empty() => format!("{command}  # {note}"),
-                _ => command.clone(),
-            };
-            ListItem::new(content)
-        })
-        .collect();
+    let end = (app.scroll_offset + app.visible_height()).min(app.filtered.len());
+    let top = app.list_top();
 
-    let local_selected = app.selected.saturating_sub(app.scroll_offset);
-    let mut state = ListState::default().with_selected(Some(local_selected));
-    frame.render_stateful_widget(
-        List::new(items)
-            .block(Block::bordered().title("命令历史"))
-            .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan))
-            .highlight_symbol("❯ "),
-        chunks[1],
-        &mut state,
-    );
-
-    let query_span = if app.query.is_empty() {
-        Span::styled("输入搜索", Style::default().fg(Color::DarkGray))
-    } else {
-        Span::raw(app.query.clone())
-    };
-    frame.render_widget(
-        Paragraph::new(Line::from(query_span))
-            .block(Block::bordered().title("搜索"))
-            .alignment(Alignment::Left),
-        chunks[2],
-    );
-
-    if app.mode == Mode::Note {
-        let modal = centered_rect(70, 9, frame.area());
-        frame.render_widget(Clear, modal);
-        let inner = Block::bordered()
-            .title("备注")
-            .border_style(Style::default().fg(Color::Cyan));
-        frame.render_widget(inner, modal);
-
-        let text_chunks = Layout::vertical([
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(1),
-        ])
-        .margin(1)
-        .split(modal);
-
-        frame.render_widget(
-            Paragraph::new(app.note_command.clone().unwrap_or_default())
-                .style(Style::default().fg(Color::Gray)),
-            text_chunks[0],
-        );
-        frame.render_widget(
-            Paragraph::new(app.note.clone()).style(Style::default().fg(Color::White)),
-            text_chunks[1],
-        );
-
-        app.save_area = Rect {
-            x: modal.x + modal.width.saturating_sub(12),
-            y: modal.y + modal.height.saturating_sub(3),
-            width: 8,
+    for (offset, command) in app.filtered[app.scroll_offset..end].iter().enumerate() {
+        // 弹窗打开时列表退到幕后，只有弹窗内的内容保持明亮。
+        let selected = search_mode && app.scroll_offset + offset == app.selected;
+        let area = Rect {
+            y: top + offset as u16,
             height: 1,
+            ..chunks[0]
         };
+        render_row(frame, app, command, area, selected, search_mode);
+    }
+
+    if search_mode {
+        render_prompt(frame, app, chunks[1]);
+    } else {
+        render_note_modal(frame, app);
+    }
+}
+
+fn render_row(
+    frame: &mut ratatui::Frame,
+    app: &App,
+    command: &str,
+    area: Rect,
+    selected: bool,
+    focused: bool,
+) {
+    if area.width == 0 {
+        return;
+    }
+    let mut line = command_line(command);
+    if let Some(note) = app.notes.get(command).filter(|note| !note.is_empty()) {
+        line.spans.push(Span::styled(
+            format!("   {note}"),
+            Style::default().fg(CHROME),
+        ));
+    }
+    if selected {
+        line = line.style(Style::default().add_modifier(Modifier::REVERSED));
+    } else if !focused {
+        // Span 自带前景色，只能逐个覆盖才能真的变暗。
+        line.spans = line
+            .spans
+            .into_iter()
+            .map(|span| span.style(Style::default().fg(CHROME)))
+            .collect();
+    }
+    frame.render_widget(line, area);
+}
+
+fn render_prompt(frame: &mut ratatui::Frame, app: &App, area: Rect) {
+    let counter = format!("{} / {}", app.filtered.len(), app.history.len());
+    let counter_width = text_width(&counter);
+    let show_counter = area.width > counter_width + 16;
+    let prompt_area = Rect {
+        width: if show_counter {
+            area.width - counter_width - 2
+        } else {
+            area.width
+        },
+        ..area
+    };
+
+    let marker_width = text_width(CURSOR);
+    let text_area = Rect {
+        x: prompt_area.x + marker_width,
+        width: prompt_area.width.saturating_sub(marker_width),
+        ..prompt_area
+    };
+    if text_area.width == 0 {
+        return;
+    }
+
+    frame.render_widget(
+        Line::from(Span::styled(CURSOR, Style::default().fg(MARKER))),
+        prompt_area,
+    );
+
+    let (query, cursor) = if app.query.is_empty() {
+        (
+            Line::from(Span::styled(PLACEHOLDER, Style::default().fg(CHROME))),
+            0,
+        )
+    } else {
+        let visible = clip_left(&app.query, text_area.width.saturating_sub(1));
+        let cursor = text_width(&visible);
+        (Line::from(Span::raw(visible)), cursor)
+    };
+    frame.render_widget(query, text_area);
+    frame.set_cursor_position(Position {
+        x: (text_area.x + cursor).min(text_area.right().saturating_sub(1)),
+        y: text_area.y,
+    });
+
+    if show_counter {
         frame.render_widget(
-            Paragraph::new("保存")
-                .alignment(Alignment::Center)
-                .style(
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            app.save_area,
+            Line::from(Span::styled(counter, Style::default().fg(CHROME)))
+                .alignment(Alignment::Right),
+            Rect {
+                x: area.right() - counter_width,
+                width: counter_width,
+                y: area.y,
+                height: 1,
+            },
         );
     }
 }
 
-fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
-    let width = area.width.saturating_mul(percent_x) / 100;
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
+fn render_note_modal(frame: &mut ratatui::Frame, app: &mut App) {
+    let modal = centered_modal(frame.area());
+    if modal.width < 8 || modal.height < 4 {
+        return;
+    }
+    frame.render_widget(Clear, modal);
+    frame.render_widget(
+        Block::bordered()
+            .border_type(BorderType::Plain)
+            .border_style(Style::default().fg(CHROME))
+            .title(Span::styled(" 备注 ", Style::default().fg(CHROME))),
+        modal,
+    );
+
+    let inner = modal.inner(Margin::new(2, 1));
+    if inner.width == 0 || inner.height < 3 {
+        return;
+    }
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    let command = app.note_command.clone().unwrap_or_default();
+    frame.render_widget(
+        Paragraph::new(clip_left(&command, rows[0].width)).style(Style::default().fg(CHROME)),
+        rows[0],
+    );
+
+    let (visible, cursor) = visible_note(&app.note, app.note_cursor, rows[1].width);
+    frame.render_widget(Paragraph::new(visible), rows[1]);
+    frame.set_cursor_position(Position {
+        x: (rows[1].x + cursor).min(rows[1].right().saturating_sub(1)),
+        y: rows[1].y,
+    });
+
+    let hint_width = text_width(NOTE_SAVE_HINT).min(rows[3].width);
+    app.save_area = Rect {
+        x: rows[3].right() - hint_width,
+        width: hint_width,
+        y: rows[3].y,
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new(NOTE_SAVE_HINT)
+            .alignment(Alignment::Right)
+            .style(Style::default().fg(CHROME)),
+        rows[3],
+    );
+}
+
+/// 只保留字符串右侧，让光标始终留在可见范围内。
+fn clip_left(text: &str, width: u16) -> String {
+    let width = width as usize;
+    if width == 0 {
+        return String::new();
+    }
+    let count = text.chars().count();
+    if count <= width {
+        return text.to_owned();
+    }
+    text.chars().skip(count - width).collect()
+}
+
+/// 返回可视文本和光标在其中的列位置。
+fn visible_note(text: &str, cursor: usize, width: u16) -> (String, u16) {
+    if width == 0 {
+        return (String::new(), 0);
+    }
+    let width = width as usize;
+    let characters: Vec<char> = text.chars().collect();
+    let cursor = cursor.min(characters.len());
+    // 光标占用最后一格，窗口末端与光标对齐。
+    let offset = cursor.saturating_sub(width.saturating_sub(1));
+    let end = (offset + width).min(characters.len());
+    let visible: String = characters[offset..end].iter().collect();
+    let before: String = characters[offset..cursor].iter().collect();
+    let column = text_width(&before).min(width.saturating_sub(1) as u16);
+    (visible, column)
+}
+
+fn text_width(text: &str) -> u16 {
+    Span::raw(text).width() as u16
+}
+
+fn centered_modal(area: Rect) -> Rect {
+    let width = area.width.saturating_sub(8).clamp(24, 72).min(area.width);
+    let height = 7.min(area.height);
     Rect {
-        x,
-        y,
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
         width,
         height,
+    }
+}
+
+/// 按 PowerShell 习惯着色：程序名绿色、参数蓝色，其余保持默认前景色。
+fn command_line(command: &str) -> Line<'static> {
+    let mut spans = Vec::new();
+    let mut expect_command = true;
+    for (gap, token) in tokenize(command) {
+        if gap {
+            spans.push(Span::raw(token.to_owned()));
+            continue;
+        }
+        let style = if is_operator(token) {
+            expect_command = true;
+            Style::default().fg(CHROME)
+        } else if expect_command {
+            expect_command = false;
+            Style::default().fg(COMMAND)
+        } else if is_option(token) {
+            Style::default().fg(OPTION)
+        } else {
+            Style::default()
+        };
+        spans.push(Span::styled(token.to_owned(), style));
+    }
+    Line::from(spans)
+}
+
+/// 把命令切成空白和词语两类片段，保证原样还原。
+fn tokenize(command: &str) -> Vec<(bool, &str)> {
+    let mut tokens: Vec<(bool, &str)> = Vec::new();
+    let mut start = 0;
+    let mut current: Option<bool> = None;
+    for (index, character) in command.char_indices() {
+        let gap = character.is_whitespace();
+        match current {
+            Some(state) if state == gap => {}
+            Some(state) => {
+                tokens.push((state, &command[start..index]));
+                start = index;
+                current = Some(gap);
+            }
+            None => current = Some(gap),
+        }
+    }
+    if let Some(state) = current {
+        tokens.push((state, &command[start..]));
+    }
+    tokens
+}
+
+fn is_operator(token: &str) -> bool {
+    token
+        .chars()
+        .any(|character| matches!(character, '|' | '&' | ';' | '<' | '>'))
+        && token
+            .chars()
+            .all(|character| matches!(character, '|' | '&' | ';' | '<' | '>' | '0'..='9'))
+}
+
+fn is_option(token: &str) -> bool {
+    token.starts_with('-') && token.chars().count() > 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn rendered(command: &str) -> Vec<(String, Style)> {
+        command_line(command)
+            .spans
+            .into_iter()
+            .map(|span| (span.content.into_owned(), span.style))
+            .collect()
+    }
+
+    #[test]
+    fn colors_program_name_and_options() {
+        let spans = rendered("atuin search --format json --limit 5");
+        assert_eq!(spans[0].0, "atuin");
+        assert_eq!(spans[0].1.fg, Some(COMMAND));
+        assert_eq!(spans[2].0, "search");
+        assert_eq!(spans[2].1.fg, None);
+        assert_eq!(spans[4].0, "--format");
+        assert_eq!(spans[4].1.fg, Some(OPTION));
+        assert_eq!(spans[8].0, "--limit");
+        assert_eq!(spans[8].1.fg, Some(OPTION));
+        assert_eq!(spans[10].0, "5");
+        assert_eq!(spans[10].1.fg, None);
+    }
+
+    #[test]
+    fn keeps_whitespace_and_highlights_pipes() {
+        let spans = rendered("dir | more");
+        let text: String = spans.iter().map(|span| span.0.clone()).collect();
+        assert_eq!(text, "dir | more");
+        assert_eq!(spans[2].1.fg, Some(CHROME));
+        assert_eq!(spans[4].0, "more");
+        assert_eq!(spans[4].1.fg, Some(COMMAND));
+    }
+
+    #[test]
+    fn treats_single_dash_as_argument() {
+        let spans = rendered("cat -");
+        assert_eq!(spans[2].0, "-");
+        assert_eq!(spans[2].1.fg, None);
+    }
+
+    #[test]
+    fn clips_long_query_from_the_left() {
+        assert_eq!(clip_left("abcdef", 3), "def");
+        assert_eq!(clip_left("abc", 3), "abc");
+        assert_eq!(clip_left("abc", 0), "");
+    }
+
+    #[test]
+    fn keeps_note_cursor_inside_the_box() {
+        assert_eq!(visible_note("hello", 5, 10), ("hello".to_owned(), 5));
+        assert_eq!(visible_note("hello", 5, 3), ("lo".to_owned(), 2));
+        assert_eq!(visible_note("hello", 1, 3), ("hel".to_owned(), 1));
+    }
+
+    fn screen(width: u16, height: u16, query: &str) -> Vec<String> {
+        let history: Vec<String> = vec![
+            "atuin".to_owned(),
+            "scoop update".to_owned(),
+            "dir".to_owned(),
+            "atuin search --format json --limit 5".to_owned(),
+            "uv run h.py".to_owned(),
+            "atuin search --delete-it-all".to_owned(),
+        ];
+        let mut notes = NoteStore::default();
+        let mut app = App::new(&history, &mut notes, query);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        buffer
+            .content
+            .chunks(width as usize)
+            .map(|row| {
+                let mut text = String::new();
+                let mut wide_tail = false;
+                for cell in row.iter() {
+                    if wide_tail {
+                        wide_tail = false;
+                        continue;
+                    }
+                    let symbol = cell.symbol();
+                    text.push_str(symbol);
+                    wide_tail = Span::raw(symbol).width() > 1;
+                }
+                text.trim_end().to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn shows_history_bottom_up_with_newest_next_to_the_prompt() {
+        let lines = screen(50, 8, "");
+        // 测试数据按 Atuin 默认顺序排列：第一条最新。
+        // 旧命令在上，最新命令紧贴输入行。
+        assert_eq!(lines[0], "".to_owned());
+        assert_eq!(
+            lines[1],
+            "atuin search --delete-it-all".to_owned(),
+            "{lines:?}"
+        );
+        assert_eq!(lines[2], "uv run h.py".to_owned());
+        assert_eq!(lines[3], "atuin search --format json --limit 5".to_owned());
+        assert_eq!(lines[4], "dir".to_owned());
+        assert_eq!(lines[5], "scoop update".to_owned());
+        assert_eq!(lines[6], "atuin".to_owned());
+        assert!(!lines
+            .iter()
+            .any(|line| line.contains("选择") || line.contains("esc")));
+        assert!(lines[7].starts_with("❯ 输入命令或备注"));
+        assert!(lines[7].ends_with("6 / 6"));
+    }
+
+    #[test]
+    fn keeps_the_newest_entries_at_the_bottom_when_scrolling() {
+        let lines = screen(40, 4, "json");
+        // 过滤命中一条时仍靠底部显示，紧贴输入行。
+        assert_eq!(lines[2], "atuin search --format json --limit 5".to_owned());
+        assert!(lines[3].starts_with("❯ json"));
+    }
+
+    #[test]
+    fn selects_the_newest_command_by_default() {
+        let history = vec!["newest".to_owned(), "older".to_owned()];
+        let mut notes = NoteStore::default();
+        let app = App::new(&history, &mut notes, "");
+        assert_eq!(app.filtered, vec!["older", "newest"]);
+        assert_eq!(app.selected_command(), Some("newest"));
+    }
+    #[test]
+    fn renders_note_modal_over_the_list() {
+        let history = vec!["cargo test".to_owned()];
+        let mut notes = NoteStore::default();
+        let mut app = App::new(&history, &mut notes, "");
+        app.enter_note_mode();
+        app.note = "运行测试".to_owned();
+        app.note_cursor = app.note.chars().count();
+
+        let mut terminal = Terminal::new(TestBackend::new(46, 9)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+        let compact: String = text.split_whitespace().collect();
+        assert!(text.contains("cargo test"), "modal did not render: {text}");
+        assert!(compact.contains("运行测试"), "note text missing: {text}");
+        assert_eq!(app.mode, Mode::Note);
+    }
+    #[test]
+    fn dims_list_while_note_modal_is_open() {
+        let history = vec!["atuin search".to_owned()];
+        let mut notes = NoteStore::default();
+        let mut app = App::new(&history, &mut notes, "");
+        let mut terminal = Terminal::new(TestBackend::new(46, 9)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        // 单条命令底部对齐，紧贴输入行。
+        let before = terminal.backend().buffer()[(0, 7)].fg;
+        assert_eq!(before, COMMAND);
+
+        app.enter_note_mode();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let dimmed = terminal.backend().buffer()[(0, 7)].fg;
+        assert_eq!(dimmed, CHROME);
+        assert_eq!(app.mode, Mode::Note);
     }
 }
