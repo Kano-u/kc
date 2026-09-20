@@ -446,7 +446,9 @@ fn event_loop(
                             });
                         }
                     }
-                    KeyCode::Left => app.enter_note_mode(),
+                    KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        app.enter_note_mode()
+                    }
                     KeyCode::Backspace if key.modifiers.contains(KeyModifiers::SHIFT) => {
                         app.request_delete();
                     }
