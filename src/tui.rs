@@ -32,6 +32,7 @@ const NOTE_SAVE_HINT: &str = "↵ 保存";
 const PLACEHOLDER: &str = "输入命令或备注";
 const CURSOR: &str = "❯ ";
 const TOOLBAR_NOTE: &str = "备注";
+const TOOLBAR_COPY: &str = "复制";
 const TOOLBAR_DELETE: &str = "删除";
 const TOOLBAR_GAP: u16 = 2;
 
@@ -122,6 +123,7 @@ struct App<'a> {
     note_command: Option<String>,
     list_area: Rect,
     toolbar_note_area: Rect,
+    toolbar_copy_area: Rect,
     toolbar_delete_area: Rect,
     save_area: Rect,
     delete_command: Option<String>,
@@ -148,6 +150,7 @@ impl<'a> App<'a> {
             note_command: None,
             list_area: Rect::default(),
             toolbar_note_area: Rect::default(),
+            toolbar_copy_area: Rect::default(),
             toolbar_delete_area: Rect::default(),
             save_area: Rect::default(),
             delete_command: None,
@@ -255,6 +258,9 @@ impl<'a> App<'a> {
         if self.toolbar_note_area.contains(position) {
             self.enter_note_mode();
             true
+        } else if self.toolbar_copy_area.contains(position) {
+            self.copy_selected_command();
+            true
         } else if self.toolbar_delete_area.contains(position) {
             self.request_delete();
             true
@@ -338,6 +344,16 @@ impl<'a> App<'a> {
             self.clamp_scroll();
             self.notice = Some(error);
         }
+    }
+
+    fn copy_selected_command(&mut self) {
+        let Some(command) = self.selected_command() else {
+            return;
+        };
+        self.notice = match copy_to_clipboard(command) {
+            Ok(()) => Some("已复制命令".to_owned()),
+            Err(error) => Some(error),
+        };
     }
 
     fn enter_note_mode(&mut self) {
@@ -527,6 +543,99 @@ fn char_to_byte_index(text: &str, char_index: usize) -> usize {
         .unwrap_or(text.len())
 }
 
+fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::iter;
+        use std::ptr;
+        use windows_sys::Win32::System::DataExchange::{
+            CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+        };
+        use windows_sys::Win32::System::Memory::{
+            GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
+        };
+        use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
+
+        let text = text.replace('\n', "\r\n");
+        let wide: Vec<u16> = text.encode_utf16().chain(iter::once(0)).collect();
+        let bytes = wide
+            .len()
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or_else(|| "命令过长，无法复制。".to_owned())?;
+
+        unsafe {
+            let handle = GlobalAlloc(GMEM_MOVEABLE, bytes);
+            if handle.is_null() {
+                return Err("无法分配剪贴板内存。".to_owned());
+            }
+            let pointer = GlobalLock(handle).cast::<u16>();
+            if pointer.is_null() {
+                return Err("无法写入剪贴板。".to_owned());
+            }
+            ptr::copy_nonoverlapping(wide.as_ptr(), pointer, wide.len());
+            let _ = GlobalUnlock(handle);
+
+            if OpenClipboard(ptr::null_mut()) == 0 {
+                return Err("无法打开系统剪贴板。".to_owned());
+            }
+            if EmptyClipboard() == 0 {
+                let _ = CloseClipboard();
+                return Err("无法清空系统剪贴板。".to_owned());
+            }
+            if SetClipboardData(u32::from(CF_UNICODETEXT), handle).is_null() {
+                let _ = CloseClipboard();
+                return Err("无法写入系统剪贴板。".to_owned());
+            }
+            let _ = CloseClipboard();
+        }
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let candidates: &[(&str, &[&str])] = &[
+            ("wl-copy", &[]),
+            ("xclip", &["-selection", "clipboard"]),
+            ("xsel", &["--clipboard", "--input"]),
+            ("termux-clipboard-set", &[]),
+            ("pbcopy", &[]),
+        ];
+        let mut last_error = None;
+        for (program, args) in candidates {
+            let mut child = match Command::new(program)
+                .args(*args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                Ok(child) => child,
+                Err(error) => {
+                    last_error = Some(error.to_string());
+                    continue;
+                }
+            };
+            if let Some(mut stdin) = child.stdin.take() {
+                if stdin.write_all(text.as_bytes()).is_err() {
+                    continue;
+                }
+            }
+            match child.wait() {
+                Ok(status) if status.success() => return Ok(()),
+                Ok(status) => last_error = Some(status.to_string()),
+                Err(error) => last_error = Some(error.to_string()),
+            }
+        }
+        Err(match last_error {
+            Some(error) => format!("复制失败: {error}"),
+            None => "复制失败: 未找到可用的剪贴板工具。".to_owned(),
+        })
+    }
+}
+
 fn render(frame: &mut ratatui::Frame, app: &mut App) {
     let search_mode = app.mode == Mode::Search;
     let chunks = Layout::vertical([
@@ -568,6 +677,7 @@ fn render(frame: &mut ratatui::Frame, app: &mut App) {
 fn render_toolbar(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     if area.width == 0 {
         app.toolbar_note_area = Rect::default();
+        app.toolbar_copy_area = Rect::default();
         app.toolbar_delete_area = Rect::default();
         return;
     }
@@ -578,7 +688,15 @@ fn render_toolbar(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
         ..area
     };
 
-    let delete_x = app.toolbar_note_area.right().saturating_add(TOOLBAR_GAP);
+    let copy_x = app.toolbar_note_area.right().saturating_add(TOOLBAR_GAP);
+    let copy_width = text_width(TOOLBAR_COPY).min(area.right().saturating_sub(copy_x));
+    app.toolbar_copy_area = Rect {
+        x: copy_x,
+        width: copy_width,
+        ..area
+    };
+
+    let delete_x = app.toolbar_copy_area.right().saturating_add(TOOLBAR_GAP);
     let delete_width = text_width(TOOLBAR_DELETE).min(area.right().saturating_sub(delete_x));
     app.toolbar_delete_area = Rect {
         x: delete_x,
@@ -595,6 +713,12 @@ fn render_toolbar(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
         Paragraph::new(TOOLBAR_NOTE).style(style),
         app.toolbar_note_area,
     );
+    if app.toolbar_copy_area.width > 0 {
+        frame.render_widget(
+            Paragraph::new(TOOLBAR_COPY).style(style),
+            app.toolbar_copy_area,
+        );
+    }
     if app.toolbar_delete_area.width > 0 {
         frame.render_widget(
             Paragraph::new(TOOLBAR_DELETE).style(style),
@@ -1133,7 +1257,7 @@ mod tests {
         let lines = screen(50, 8, "");
         // 测试数据按 Atuin 默认顺序排列：第一条最新。
         // 旧命令在上，最新命令紧贴输入行。
-        assert_eq!(lines[0], "备注  删除".to_owned());
+        assert_eq!(lines[0], "备注  复制  删除".to_owned());
         assert_eq!(
             lines[1],
             "atuin search --delete-it-all".to_owned(),
