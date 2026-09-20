@@ -29,7 +29,6 @@ const MARKER: Color = COMMAND;
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 const NOTE_SAVE_HINT: &str = "↵ 保存";
-const PLACEHOLDER: &str = "输入命令或备注";
 const CURSOR: &str = "❯ ";
 const TOOLBAR_NOTE: &str = "备注";
 const TOOLBAR_COPY: &str = "复制";
@@ -795,10 +794,7 @@ fn render_prompt(frame: &mut ratatui::Frame, app: &App, area: Rect) {
     );
 
     let (query, cursor) = if app.query.is_empty() {
-        (
-            Line::from(Span::styled(PLACEHOLDER, Style::default().fg(CHROME))),
-            0,
-        )
+        (Line::default(), 0)
     } else {
         let visible = clip_left(&app.query, text_area.width.saturating_sub(1));
         let cursor = text_width(&visible);
@@ -1271,7 +1267,6 @@ mod tests {
         assert!(!lines
             .iter()
             .any(|line| line.contains("选择") || line.contains("esc")));
-        assert!(lines[7].starts_with("❯ 输入命令或备注"));
         assert!(lines[7].ends_with("6 / 6"));
     }
 
