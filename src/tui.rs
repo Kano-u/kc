@@ -12,7 +12,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Margin, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph},
     Terminal,
 };
 use serde::Serialize;
@@ -21,9 +21,10 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
-/// 界面装饰只使用暗灰，彩色留给命令本身。
+/// 界面装饰使用暗灰，工具栏操作文字用白色，彩色留给命令本身。
 const CHROME: Color = Color::DarkGray;
 const COMMAND: Color = Color::Rgb(0x16, 0xc6, 0x0c);
+const TOOLBAR: Color = Color::White;
 const OPTION: Color = Color::Rgb(0x3a, 0x96, 0xdd);
 const MARKER: Color = COMMAND;
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -641,13 +642,14 @@ fn render(frame: &mut ratatui::Frame, app: &mut App) {
     let search_mode = app.mode == Mode::Search;
     let chunks = Layout::vertical([
         Constraint::Length(1),
+        Constraint::Length(1),
         Constraint::Min(1),
         Constraint::Length(1),
     ])
     .split(frame.area());
 
     // 列表直接铺在终端背景上，没有边框、提示行和外框。
-    app.list_area = chunks[1];
+    app.list_area = chunks[2];
     app.clamp_scroll();
     let end = (app.scroll_offset + app.visible_height()).min(app.filtered.len());
     let top = app.list_top();
@@ -658,14 +660,15 @@ fn render(frame: &mut ratatui::Frame, app: &mut App) {
         let area = Rect {
             y: top + offset as u16,
             height: 1,
-            ..chunks[1]
+            ..chunks[2]
         };
         render_row(frame, app, command, area, selected, search_mode);
     }
 
     render_toolbar(frame, app, chunks[0]);
+    render_divider(frame, chunks[1]);
     if search_mode {
-        render_prompt(frame, app, chunks[2]);
+        render_prompt(frame, app, chunks[3]);
     } else {
         if app.mode == Mode::Note {
             render_note_modal(frame, app);
@@ -675,6 +678,18 @@ fn render(frame: &mut ratatui::Frame, app: &mut App) {
     }
 }
 
+fn render_divider(frame: &mut ratatui::Frame, area: Rect) {
+    if area.width == 0 {
+        return;
+    }
+    frame.render_widget(
+        Block::default()
+            .border_type(BorderType::Plain)
+            .borders(Borders::BOTTOM)
+            .border_style(Style::default().fg(CHROME)),
+        area,
+    );
+}
 fn render_toolbar(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     if area.width == 0 {
         app.toolbar_note_area = Rect::default();
@@ -706,9 +721,9 @@ fn render_toolbar(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     };
 
     let style = if app.mode == Mode::Search {
-        Style::default().fg(CHROME)
+        Style::default().fg(TOOLBAR)
     } else {
-        Style::default().fg(CHROME).add_modifier(Modifier::DIM)
+        Style::default().fg(TOOLBAR).add_modifier(Modifier::DIM)
     };
     frame.render_widget(
         Paragraph::new(TOOLBAR_NOTE).style(style),
@@ -1256,12 +1271,8 @@ mod tests {
         // 测试数据按 Atuin 默认顺序排列：第一条最新。
         // 旧命令在上，最新命令紧贴输入行。
         assert_eq!(lines[0], "备注  复制  删除".to_owned());
-        assert_eq!(
-            lines[1],
-            "atuin search --delete-it-all".to_owned(),
-            "{lines:?}"
-        );
-        assert_eq!(lines[2], "uv run h.py".to_owned());
+        assert_eq!(lines[1], "─".repeat(50));
+        assert_eq!(lines[2], "uv run h.py".to_owned(), "{lines:?}");
         assert_eq!(lines[3], "atuin search --format json --limit 5".to_owned());
         assert_eq!(lines[4], "dir".to_owned());
         assert_eq!(lines[5], "scoop update".to_owned());
@@ -1288,6 +1299,8 @@ mod tests {
         let mut app = App::new(&history, &mut notes, "");
         let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
+
+        assert_eq!(terminal.backend().buffer()[(0, 0)].fg, TOOLBAR);
 
         let note = Position {
             x: app.toolbar_note_area.x,
