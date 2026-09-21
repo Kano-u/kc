@@ -21,19 +21,19 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
-/// 界面装饰使用暗灰，工具栏操作文字用白色，彩色留给命令本身。
+/// 界面装饰使用暗灰，普通文字沿用终端的默认前景色，彩色留给命令本身。
 const CHROME: Color = Color::DarkGray;
 const COMMAND: Color = Color::Rgb(0x16, 0xc6, 0x0c);
-const TOOLBAR: Color = Color::White;
 const OPTION: Color = Color::Rgb(0x3a, 0x96, 0xdd);
 const MARKER: Color = COMMAND;
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 const NOTE_SAVE_HINT: &str = "↵ 保存";
 const CURSOR: &str = "❯ ";
-const TOOLBAR_NOTE: &str = "备注";
-const TOOLBAR_COPY: &str = "复制";
-const TOOLBAR_DELETE: &str = "删除";
+// Nerd Font 图标：备注用铅笔、复制用叠页、删除用垃圾桶。
+const TOOLBAR_NOTE: &str = "\u{f044} 备注";
+const TOOLBAR_COPY: &str = "\u{f0c5} 复制";
+const TOOLBAR_DELETE: &str = "\u{f014} 删除";
 const TOOLBAR_GAP: u16 = 2;
 
 fn split_query(query: &str) -> (bool, &str) {
@@ -730,9 +730,9 @@ fn render_toolbar(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     };
 
     let style = if app.mode == Mode::Search {
-        Style::default().fg(TOOLBAR)
+        Style::default()
     } else {
-        Style::default().fg(TOOLBAR).add_modifier(Modifier::DIM)
+        Style::default().add_modifier(Modifier::DIM)
     };
     frame.render_widget(
         Paragraph::new(TOOLBAR_NOTE).style(style),
@@ -1279,7 +1279,7 @@ mod tests {
         let lines = screen(50, 8, "");
         // 测试数据按 Atuin 默认顺序排列：第一条最新。
         // 旧命令在上，最新命令紧贴输入行。
-        assert_eq!(lines[0], "备注  复制  删除".to_owned());
+        assert_eq!(lines[0], "\u{f044} 备注  \u{f0c5} 复制  \u{f014} 删除".to_owned());
         assert_eq!(lines[1], "─".repeat(50));
         assert_eq!(lines[2], "uv run h.py".to_owned(), "{lines:?}");
         assert_eq!(lines[3], "atuin search --format json --limit 5".to_owned());
@@ -1340,7 +1340,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
 
-        assert_eq!(terminal.backend().buffer()[(0, 0)].fg, TOOLBAR);
+        assert_eq!(terminal.backend().buffer()[(0, 0)].fg, Color::Reset);
 
         let note = Position {
             x: app.toolbar_note_area.x,
