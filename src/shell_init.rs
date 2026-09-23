@@ -228,6 +228,17 @@ class KcPreviewCache : System.Management.Automation.Subsystem.Prediction.IComman
         [string] $commandLine, [bool] $success) {
     }
 }
+
+$global:KcPreviewPredictor = [KcPreviewCache]::new($global:KcPreviewPath)
+[System.Management.Automation.Subsystem.SubsystemManager]::RegisterSubsystem(
+    [System.Management.Automation.Subsystem.SubsystemKind]::CommandPredictor,
+    $global:KcPreviewPredictor
+)
+
+# Plugin, not the combined history-and-plugin source: PSReadLine drops plugin suggestions
+# that are byte-identical to a history entry, which would hide kc's own candidates.
+Set-PSReadLineOption -PredictionSource Plugin
+Set-PSReadLineOption -PredictionViewStyle ListView
 "#;
 
 #[cfg(test)]
@@ -310,6 +321,26 @@ mod tests {
         assert!(POWERSHELL.contains(
             "[System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion]::new($pair.Key, $note)"
         ));
+    }
+
+    #[test]
+    fn registers_the_predictor_with_its_full_type_names() {
+        assert!(POWERSHELL.contains(
+            "[KcPreviewCache]::new($global:KcPreviewPath)"
+        ));
+        assert!(POWERSHELL.contains(
+            "[System.Management.Automation.Subsystem.SubsystemManager]::RegisterSubsystem("
+        ));
+        assert!(POWERSHELL.contains(
+            "[System.Management.Automation.Subsystem.SubsystemKind]::CommandPredictor"
+        ));
+    }
+
+    #[test]
+    fn previews_with_the_plugin_source_in_list_view() {
+        assert!(POWERSHELL.contains("Set-PSReadLineOption -PredictionSource Plugin"));
+        assert!(!POWERSHELL.contains("HistoryAndPlugin"));
+        assert!(POWERSHELL.contains("Set-PSReadLineOption -PredictionViewStyle ListView"));
     }
 
     #[test]
