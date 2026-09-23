@@ -124,6 +124,107 @@ Set-PSReadLineKeyHandler -Chord UpArrow -BriefDescription "Runs kc history picke
         [Microsoft.PowerShell.PSConsoleReadLine]::PreviousLine()
     }
 }
+
+# The command predictor reads the cache file kc exports and runs on every keystroke,
+# so it must never fork kc. Every type below is spelled with its full name: this block
+# reaches the profile through Invoke-Expression, where namespace imports have no effect.
+class KcPreviewCache : System.Management.Automation.Subsystem.Prediction.ICommandPredictor {
+    [guid] $Id = [guid]::NewGuid()
+    [string] $Name = 'kc'
+    [string] $Description = 'kc history preview'
+    [System.Collections.Generic.Dictionary[string, string]] $FunctionsToDefine = $null
+    [string] $Path
+    [datetime] $Stamp = [datetime]::MinValue
+    [System.Collections.Generic.Dictionary[string, string]] $Entries = [System.Collections.Generic.Dictionary[string, string]]::new()
+    [System.Management.Automation.Subsystem.Prediction.SuggestionPackage] $Package
+
+    KcPreviewCache([string] $cachePath) {
+        $this.Path = $cachePath
+        $this.Reload()
+        # SuggestionPackage refuses an empty list, so the package is built once around a
+        # seed entry; every call reuses its own List and returns the same package.
+        $seed = [System.Collections.Generic.List[System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion]]::new()
+        $seed.Add([System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion]::new('seed'))
+        $this.Package = [System.Management.Automation.Subsystem.Prediction.SuggestionPackage]::new($seed)
+        $this.Package.SuggestionEntries.Clear()
+    }
+
+    # One stat per keystroke: the file is only re-read when kc rewrote it.
+    [void] Refresh() {
+        if (-not (Test-Path -LiteralPath $this.Path)) {
+            return
+        }
+        $current = (Get-Item -LiteralPath $this.Path).LastWriteTimeUtc
+        if ($current -eq $this.Stamp) {
+            return
+        }
+        $this.Reload()
+    }
+
+    [void] Reload() {
+        $this.Entries.Clear()
+        $this.Stamp = [datetime]::MinValue
+        if (-not (Test-Path -LiteralPath $this.Path)) {
+            return
+        }
+        $this.Stamp = (Get-Item -LiteralPath $this.Path).LastWriteTimeUtc
+        # The notes are UTF-8; the default encoding would mangle them.
+        foreach ($line in [System.IO.File]::ReadAllLines($this.Path, [System.Text.Encoding]::UTF8)) {
+            $split = $line.IndexOf([char] 9)
+            if ($split -le 0) {
+                continue
+            }
+            $this.Entries[$line.Substring(0, $split)] = $line.Substring($split + 1)
+        }
+    }
+
+    [System.Management.Automation.Subsystem.Prediction.SuggestionPackage] GetSuggestion(
+        [System.Management.Automation.Subsystem.Prediction.PredictionClient] $client,
+        [System.Management.Automation.Subsystem.Prediction.PredictionContext] $context,
+        [System.Threading.CancellationToken] $cancellationToken) {
+        $target = $this.Package.SuggestionEntries
+        $target.Clear()
+        $this.Refresh()
+        $prefix = $context.InputAst.Extent.Text
+        if (-not [string]::IsNullOrEmpty($prefix)) {
+            foreach ($pair in $this.Entries.GetEnumerator()) {
+                if ($pair.Key.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $target.Add([System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion]::new($pair.Key))
+                    if ($target.Count -ge 10) {
+                        break
+                    }
+                }
+            }
+        }
+        return $this.Package
+    }
+
+    [bool] CanAcceptFeedback(
+        [System.Management.Automation.Subsystem.Prediction.PredictionClient] $client,
+        [System.Management.Automation.Subsystem.Prediction.PredictorFeedbackKind] $feedbackKind) {
+        return $false
+    }
+
+    [void] OnSuggestionDisplayed(
+        [System.Management.Automation.Subsystem.Prediction.PredictionClient] $client,
+        [uint32] $session, [int] $count) {
+    }
+
+    [void] OnSuggestionAccepted(
+        [System.Management.Automation.Subsystem.Prediction.PredictionClient] $client,
+        [uint32] $session, [string] $acceptedSuggestion) {
+    }
+
+    [void] OnCommandLineAccepted(
+        [System.Management.Automation.Subsystem.Prediction.PredictionClient] $client,
+        [System.Collections.Generic.IReadOnlyList[string]] $history) {
+    }
+
+    [void] OnCommandLineExecuted(
+        [System.Management.Automation.Subsystem.Prediction.PredictionClient] $client,
+        [string] $commandLine, [bool] $success) {
+    }
+}
 "#;
 
 #[cfg(test)]
@@ -173,6 +274,29 @@ mod tests {
         assert!(POWERSHELL.contains("$entry.Id -ne $global:KcLastId"));
         assert!(POWERSHELL.contains("kc record --command-env KC_COMMAND"));
         assert!(POWERSHELL.contains(r#"$env:KC_RECORD = if ($ok) { "1" } else { "0" }"#));
+    }
+
+    #[test]
+    fn the_predictor_class_uses_fully_qualified_names() {
+        assert!(POWERSHELL.contains(
+            "class KcPreviewCache : System.Management.Automation.Subsystem.Prediction.ICommandPredictor"
+        ));
+        assert!(!POWERSHELL.contains("using namespace"));
+    }
+
+    #[test]
+    fn the_predictor_reads_the_cache_as_utf8_and_filters_by_prefix() {
+        assert!(POWERSHELL.contains("[System.Text.Encoding]::UTF8"));
+        assert!(POWERSHELL.contains(
+            "$pair.Key.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)"
+        ));
+        assert!(POWERSHELL.contains("$context.InputAst.Extent.Text"));
+    }
+
+    #[test]
+    fn the_predictor_caches_the_file_by_modification_time() {
+        assert!(POWERSHELL.contains("(Get-Item -LiteralPath $this.Path).LastWriteTimeUtc"));
+        assert!(POWERSHELL.contains("if ($current -eq $this.Stamp)"));
     }
 
     #[test]
