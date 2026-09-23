@@ -1,6 +1,7 @@
 use crate::app::Config;
 use crate::args;
 use crate::data_paths::history_db;
+use crate::export;
 use crate::history;
 use std::process::ExitCode;
 
@@ -28,7 +29,12 @@ fn record(args: &[String]) -> Result<(), String> {
 
     // 配置坏掉时绝不"不过滤照记"：宁可这条不记，也不能把本该被 filter 挡住的命令写进库。
     let config = Config::load()?;
-    history::upsert(&history_db()?, &command, succeeded(), &config)
+    history::upsert(&history_db()?, &command, succeeded(), &config)?;
+
+    // 这条命令已经进库了；预览缓存是派生数据，刷新失败不能反过来影响记录 ——
+    // record 跑在提示符路径上，任何报错都只会变成提示符前的噪音。
+    let _ = export::refresh();
+    Ok(())
 }
 
 /// 去掉首尾空白（含多行命令的行尾换行），保留内嵌换行；全空白视为空命令。
