@@ -1,6 +1,7 @@
 mod app;
 mod args;
 mod data_paths;
+mod export;
 mod history;
 mod import;
 mod notes;
@@ -21,6 +22,7 @@ const USAGE: &str = "kc - Shell 历史记录笔记与搜索
                           将命令记录到 NAME 环境变量中
   kc import --shell powershell
                           导入 PowerShell 历史记录
+  kc export               把历史与备注导出为预览缓存
   kc init --shell powershell
                           打印 PowerShell 集成脚本
   kc --help               显示此帮助
@@ -39,6 +41,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("init") => shell_init::main(&args[1..]),
+        Some("export") => export::main(&args[1..]),
         Some("import") => import::main(&args[1..]),
         Some("pick") => pick::main(&args[1..]),
         Some("record") => record::main(&args[1..]),

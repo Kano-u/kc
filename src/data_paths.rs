@@ -5,6 +5,12 @@ pub fn history_db() -> Result<PathBuf, String> {
     Ok(home_dir()?.join(".kc").join("history.db"))
 }
 
+/// 命令预览缓存，与历史数据库同目录：同为本机数据，不参与同步。
+/// 只给 PowerShell 预测器读，路径固定，shell 侧不需要环境变量。
+pub fn preview_cache() -> Result<PathBuf, String> {
+    Ok(home_dir()?.join(".kc").join("preview.tsv"))
+}
+
 /// Windows 用 `USERPROFILE`，Termux 等用 `HOME`；两者都没有就报错，
 /// 绝不能退化到当前目录，否则历史与备注会写进任意工作目录。
 fn home_dir() -> Result<PathBuf, String> {
@@ -145,6 +151,13 @@ mod tests {
         assert!(!path.starts_with(&config), "{}", path.display());
         std::env::remove_var("KC_CONFIG_DIR");
         std::fs::remove_dir_all(config).unwrap();
+    }
+
+    #[test]
+    fn preview_cache_lives_next_to_the_history_database() {
+        let path = preview_cache().unwrap();
+        assert!(path.ends_with(Path::new(".kc").join("preview.tsv")));
+        assert_eq!(path.parent(), history_db().unwrap().parent());
     }
 
     #[test]
