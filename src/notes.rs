@@ -64,6 +64,12 @@ impl NoteStore {
         self.save()
     }
 
+    pub fn remove(&mut self, command: &str) -> Result<(), String> {
+        remove_note(&mut self.local_notes, command);
+        remove_note(&mut self.notes, command);
+        self.save()
+    }
+
     pub fn save(&self) -> Result<(), String> {
         let Some(path) = &self.path else {
             return Err("备注路径未设置。".to_owned());
@@ -117,6 +123,10 @@ fn upsert_note(notes: &mut Vec<Note>, note: Note) {
         Some(_) => {}
         None => notes.push(note),
     }
+}
+
+fn remove_note(notes: &mut Vec<Note>, command: &str) {
+    notes.retain(|item| item.command != command);
 }
 
 fn now() -> String {
@@ -216,6 +226,38 @@ mod tests {
         assert_eq!(store.get("dir"), Some("com only"));
         assert_eq!(store.get("pwd"), Some("phone only"));
         assert_eq!(store.len(), 3);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn removes_a_note_and_persists_the_deletion() {
+        let dir = temp_dir("remove");
+        let path = dir.join("com.notes.jsonl");
+        let mut store = NoteStore::load_from(&path).unwrap();
+        store.set("cargo test", "运行测试").unwrap();
+        store.set("cargo build", "构建").unwrap();
+
+        store.remove("cargo test").unwrap();
+        assert_eq!(store.get("cargo test"), None);
+        assert_eq!(store.get("cargo build"), Some("构建"));
+        assert_eq!(store.len(), 1);
+
+        let reloaded = NoteStore::load_from(&path).unwrap();
+        assert_eq!(reloaded.len(), 1);
+        assert_eq!(reloaded.get("cargo test"), None);
+        assert_eq!(reloaded.get("cargo build"), Some("构建"));
+        assert!(!fs::read_to_string(&path).unwrap().contains("cargo test"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn removing_a_missing_note_succeeds() {
+        let dir = temp_dir("remove-missing");
+        let path = dir.join("com.notes.jsonl");
+        let mut store = NoteStore::load_from(&path).unwrap();
+
+        store.remove("never noted").unwrap();
+        assert_eq!(store.len(), 0);
         fs::remove_dir_all(dir).unwrap();
     }
 
