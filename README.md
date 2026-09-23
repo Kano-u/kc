@@ -1,6 +1,6 @@
 # kc
 
-基于 Atuin 的命令历史搜索与备注工具。
+自记录命令历史的搜索与备注工具。
 
 ## 功能
 
@@ -10,8 +10,7 @@
 - `Enter` 执行选中命令
 - `Tab` / `→` 插入命令但不执行
 - `←` 编辑选中命令备注
-- 鼠标/触摸：点击选择、滚轮滚动、点击保存
-- `Shift+Backspace` 删除选中命令的 Atuin 历史；无备注直接删除，有备注需确认
+- `Shift+Backspace` 删除选中命令，无备注直接删除，有备注需确认
 - 输入以空格开头时只搜索有备注的命令，空格后的文字参与匹配
 - 鼠标/触摸：点击选择、滚轮滚动、点击保存或确认
 - 主机标记 `.host` 决定当前主机的配置文件和备注写入文件
@@ -25,7 +24,7 @@ cargo install --path .
 
 ## 从 Git Clone 安装
 
-先在系统中安装 `git`、Rust 工具链和 Atuin。然后：
+先在系统中安装 `git` 和 Rust 工具链。然后：
 
 ```bash
 git clone https://github.com/Kano-u/kc.git
@@ -48,13 +47,22 @@ cargo install --path . --force
 kc init powershell | Out-String | Invoke-Expression
 ```
 
-## Termux / Bash 集成
+这段输出必须放在 profile 的最后一行：它定义 `global:prompt`，之后定义的 prompt 会把它覆盖掉，命令就会悄悄不再进历史。
 
-在 `~/.bashrc` 中添加：
+## 命令历史
 
-```bash
-eval "$(kc init bash)"
-```
+kc 自己记录命令历史，不依赖 Atuin 等外部工具。
+
+记录由 PowerShell 的 `prompt` 钩子驱动：每次提示符出现前，kc 读取刚执行的那条命令，连同成功/失败一并写入数据库。失败的命令同样记录。
+
+历史数据库固定在用户目录，与同步目录无关，也不参与同步：
+
+| 平台 | 路径 |
+| --- | --- |
+| Windows | `%USERPROFILE%\.kc\history.db` |
+| 其他 | `~/.kc/history.db` |
+
+数据库是 SQLite，`command` 是主键，同名命令只保留一条，重复执行刷新时间戳。删除是物理删除，文件里不留痕迹。
 
 ## 配置
 
@@ -69,7 +77,7 @@ kc 会合并读取目录下所有 `*.notes.jsonl`。同名命令保留 `updated_
 history_limit = 5000
 ```
 
-`filter` 是排除规则列表，匹配任一正则的命令会从列表中隐藏。正则默认不是完全匹配，若要完整匹配整条命令，请加上 `^` 和 `$`：
+`filter` 是排除规则列表，匹配任一正则的命令既不显示、也不记录，因此可以把密钥挡在历史数据库之外。正则默认不是完全匹配，若要完整匹配整条命令，请加上 `^` 和 `$`：
 
 ```toml
 history_limit = 5000
@@ -90,7 +98,7 @@ filter = [
 export KC_CONFIG_DIR="$HOME/kc"
 ```
 
-建议使用绝对路径；相对路径会相对于启动 `kc` 时的工作目录解析。
+建议使用绝对路径；相对路径会相对于启动 `kc` 时的工作目录解析。历史数据库不受此变量影响，始终在用户目录下。
 
 ## 开发检查
 
