@@ -1,4 +1,5 @@
 mod app;
+mod args;
 mod data_paths;
 mod history;
 mod import;
@@ -14,12 +15,14 @@ const USAGE: &str = "kc - Shell 历史记录笔记与搜索
 
 用法:
   kc                      启动 TUI
-  kc pick --query-env NAME --result-file-env NAME
+  kc pick --query-env NAME [--result-file-env NAME]
                           为 shell 集成启动 TUI；结果写入文件（未给则为 JSON）
   kc record --command-env NAME
                           将命令记录到 NAME 环境变量中
-  kc import powershell    将 PowerShell 历史记录导入数据库
-  kc init powershell      打印 PowerShell 集成脚本
+  kc import --shell powershell
+                          导入 PowerShell 历史记录
+  kc init --shell powershell
+                          打印 PowerShell 集成脚本
   kc --help               显示此帮助
 
 环境变量:
@@ -35,7 +38,7 @@ fn main() -> ExitCode {
             print!("{USAGE}");
             ExitCode::SUCCESS
         }
-        Some("init") => shell_init::print(args.get(1).map(String::as_str)),
+        Some("init") => shell_init::main(&args[1..]),
         Some("import") => import::main(&args[1..]),
         Some("pick") => pick::main(&args[1..]),
         Some("record") => record::main(&args[1..]),

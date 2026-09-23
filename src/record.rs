@@ -1,7 +1,11 @@
 use crate::app::Config;
+use crate::args;
 use crate::data_paths::history_db;
 use crate::history;
 use std::process::ExitCode;
+
+const USAGE: &str = "kc record --command-env NAME";
+const ALLOWED: &[&str] = &["--command-env"];
 
 /// 由 PowerShell 的 prompt 钩子调用：把刚执行的命令写进历史库。
 ///
@@ -14,22 +18,17 @@ pub fn main(args: &[String]) -> ExitCode {
 }
 
 fn record(args: &[String]) -> Result<(), String> {
-    let name = command_env(args)?;
-    let Some(command) = std::env::var(&name).ok().as_deref().and_then(clean) else {
+    let values = args::parse(args, ALLOWED)?;
+    let name = values
+        .get("--command-env")
+        .ok_or_else(|| format!("缺少 --command-env。\n用法: {USAGE}"))?;
+    let Some(command) = std::env::var(name).ok().as_deref().and_then(clean) else {
         return Ok(());
     };
 
     // 配置坏掉时绝不"不过滤照记"：宁可这条不记，也不能把本该被 filter 挡住的命令写进库。
     let config = Config::load()?;
     history::upsert(&history_db()?, &command, succeeded(), &config)
-}
-
-/// 只认 `--command-env NAME` 这一种写法，多余或缺失的参数都是用法错误。
-fn command_env(args: &[String]) -> Result<String, String> {
-    match args {
-        [flag, name] if flag == "--command-env" && !name.is_empty() => Ok(name.clone()),
-        _ => Err("用法: kc record --command-env NAME".to_owned()),
-    }
 }
 
 /// 去掉首尾空白（含多行命令的行尾换行），保留内嵌换行；全空白视为空命令。
@@ -48,21 +47,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accepts_only_the_exact_flag_form() {
-        assert_eq!(
-            command_env(&["--command-env".to_owned(), "KC_COMMAND".to_owned()]),
-            Ok("KC_COMMAND".to_owned())
-        );
-        assert!(command_env(&[]).is_err());
-        assert!(command_env(&["--command-env".to_owned()]).is_err());
-        assert!(command_env(&["--command-env".to_owned(), String::new()]).is_err());
-        assert!(command_env(&[
-            "--command-env".to_owned(),
-            "KC_COMMAND".to_owned(),
-            "extra".to_owned()
-        ])
-        .is_err());
-        assert!(command_env(&["-c".to_owned(), "KC_COMMAND".to_owned()]).is_err());
+    fn rejects_missing_unknown_and_extra_arguments() {
+        // 参数解析统一由 args 模块负责，这里只确认 record 接住了它的错误。
+        assert!(record(&[]).is_err());
+        assert!(record(&["--command-env".to_owned()]).is_err());
+        assert!(record(&["-c".to_owned(), "KC_COMMAND".to_owned()]).is_err());
+        assert!(record(&["--command-env".to_owned(), "".to_owned()]).is_err());
     }
 
     #[test]

@@ -1,19 +1,30 @@
+use crate::args;
 use std::process::ExitCode;
 
-pub fn print(shell: Option<&str>) -> ExitCode {
-    match shell {
+const USAGE: &str = "kc init --shell powershell";
+const ALLOWED: &[&str] = &["--shell"];
+
+pub fn main(args: &[String]) -> ExitCode {
+    let values = match args::parse(args, ALLOWED) {
+        Ok(values) => values,
+        Err(error) => {
+            eprintln!("{error}\n用法: {USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    match values.get("--shell").map(String::as_str) {
         Some("powershell") => {
             print!("{POWERSHELL}");
             ExitCode::SUCCESS
         }
         _ => {
-            eprintln!("用法: kc init powershell");
+            eprintln!("只支持 --shell powershell。\n用法: {USAGE}");
             ExitCode::from(2)
         }
     }
 }
 
-/// 这份脚本必须保持纯 ASCII：它经 `kc init powershell | Invoke-Expression`
+/// 这份脚本必须保持纯 ASCII：它经 `kc init --shell powershell | Invoke-Expression`
 /// 进入 PowerShell，而管道的解码用的是控制台代码页。非 ASCII 字节在
 /// 代码页不是 UTF-8 的终端（如 936）会被解坏，脚本随即语法错误。
 const POWERSHELL: &str = r#"# Keep this block as the last statement of the profile.
@@ -142,7 +153,12 @@ mod tests {
 
     #[test]
     fn rejects_unknown_shells() {
-        assert_eq!(print(None), ExitCode::from(2));
-        assert_eq!(print(Some("bash")), ExitCode::from(2));
+        assert_eq!(main(&[]), ExitCode::from(2));
+        assert_eq!(
+            main(&["--shell".to_owned(), "bash".to_owned()]),
+            ExitCode::from(2)
+        );
+        assert_eq!(main(&["powershell".to_owned()]), ExitCode::from(2));
+        assert_eq!(main(&["--shell".to_owned()]), ExitCode::from(2));
     }
 }

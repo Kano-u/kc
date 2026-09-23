@@ -44,7 +44,7 @@ cargo install --path . --force
 在 PowerShell profile 中添加：
 
 ```powershell
-kc init powershell | Out-String | Invoke-Expression
+kc init --shell powershell | Out-String | Invoke-Expression
 ```
 
 这段输出必须放在 profile 的最后一行：它定义 `global:prompt`，之后定义的 prompt 会把它覆盖掉，命令就会悄悄不再进历史。
@@ -69,7 +69,7 @@ kc 自己记录命令历史，不依赖 Atuin 等外部工具。
 PSReadLine 自己的历史文件不会被 kc 读取，但可以一次性并入：
 
 ```powershell
-kc import powershell
+kc import --shell powershell
 ```
 
 它读取 `%APPDATA%\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt`，按文件顺序写入历史库。该文件没有时间戳，kc 用当前时间往前铺开、依序递增，导入的命令排在现有历史之后。

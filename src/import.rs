@@ -1,17 +1,25 @@
 use crate::app::Config;
+use crate::args;
 use crate::data_paths::history_db;
 use crate::history;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+const USAGE: &str = "kc import --shell powershell";
+const ALLOWED: &[&str] = &["--shell"];
+
 /// 把 PowerShell（PSReadLine）已有的历史并入 kc 的历史库。
 pub fn main(args: &[String]) -> ExitCode {
-    match args {
-        [shell] if shell == "powershell" => {}
-        _ => {
-            eprintln!("用法: kc import powershell");
+    let values = match args::parse(args, ALLOWED) {
+        Ok(values) => values,
+        Err(error) => {
+            eprintln!("{error}\n用法: {USAGE}");
             return ExitCode::from(2);
         }
+    };
+    if values.get("--shell").map(String::as_str) != Some("powershell") {
+        eprintln!("只支持 --shell powershell。\n用法: {USAGE}");
+        return ExitCode::from(2);
     }
 
     match run() {
@@ -115,10 +123,18 @@ mod tests {
     #[test]
     fn accepts_only_powershell() {
         assert_eq!(main(&[]), ExitCode::from(2));
-        assert_eq!(main(&["bash".to_owned()]), ExitCode::from(2));
         assert_eq!(
-            main(&["powershell".to_owned(), "x".to_owned()]),
+            main(&["--shell".to_owned(), "bash".to_owned()]),
             ExitCode::from(2)
         );
+        assert_eq!(
+            main(&[
+                "--shell".to_owned(),
+                "powershell".to_owned(),
+                "x".to_owned()
+            ]),
+            ExitCode::from(2)
+        );
+        assert_eq!(main(&["powershell".to_owned()]), ExitCode::from(2));
     }
 }

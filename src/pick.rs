@@ -1,47 +1,27 @@
+use crate::args;
 use crate::tui::PickResult;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+const USAGE: &str = "kc pick --query-env NAME [--result-file-env NAME]";
+const ALLOWED: &[&str] = &["--query-env", "--result-file-env"];
+
 /// shell 集成入口：查询串与结果路径都从环境变量读，避免命令行转义问题。
 pub fn main(args: &[String]) -> ExitCode {
-    let mut query_env: Option<String> = None;
-    let mut result_file_env: Option<String> = None;
-    let mut index = 0;
-
-    while index < args.len() {
-        match args[index].as_str() {
-            "--query-env" => {
-                index += 1;
-                match args.get(index) {
-                    Some(name) => query_env = Some(name.clone()),
-                    None => {
-                        eprintln!("--query-env 缺少变量名。");
-                        return ExitCode::from(2);
-                    }
-                }
-            }
-            "--result-file-env" => {
-                index += 1;
-                match args.get(index) {
-                    Some(name) => result_file_env = Some(name.clone()),
-                    None => {
-                        eprintln!("--result-file-env 缺少变量名。");
-                        return ExitCode::from(2);
-                    }
-                }
-            }
-            _ => {
-                eprintln!("kc pick 收到未知参数。");
-                return ExitCode::from(2);
-            }
+    let values = match args::parse(args, ALLOWED) {
+        Ok(values) => values,
+        Err(error) => {
+            eprintln!("{error}\n用法: {USAGE}");
+            return ExitCode::from(2);
         }
-        index += 1;
-    }
+    };
 
-    let query = query_env
+    let query = values
+        .get("--query-env")
         .and_then(|name| std::env::var(name).ok())
         .unwrap_or_default();
-    let result_file = result_file_env
+    let result_file = values
+        .get("--result-file-env")
         .and_then(|name| std::env::var(name).ok())
         .map(PathBuf::from);
 
