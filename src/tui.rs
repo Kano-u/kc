@@ -1,3 +1,5 @@
+use crate::data_paths::history_db;
+use crate::history;
 use crate::notes::NoteStore;
 use crossterm::{
     event::{
@@ -17,8 +19,6 @@ use ratatui::{
 };
 use serde::Serialize;
 use std::io::Stdout;
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::thread;
 use std::time::Duration;
 
 /// 界面装饰使用暗灰，普通文字沿用终端的默认前景色，彩色留给命令本身。
@@ -51,13 +51,6 @@ fn matches_query(command: &str, note: Option<&str>, query: &str, notes_only: boo
     query.is_empty()
         || command.to_lowercase().contains(query)
         || note.is_some_and(|note| note.to_lowercase().contains(query))
-}
-
-fn spawn_delete(job: DeleteJob, sender: Sender<DeleteOutcome>) {
-    thread::spawn(move || {
-        let result = crate::history::delete(&crate::data_paths::history_db(), &job.command);
-        let _ = sender.send(DeleteOutcome { job, result });
-    });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -97,19 +90,6 @@ enum DeleteRequest {
     Confirm(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DeleteJob {
-    command: String,
-    history_index: usize,
-    filtered_index: usize,
-    scroll_offset: usize,
-}
-
-struct DeleteOutcome {
-    job: DeleteJob,
-    result: Result<(), String>,
-}
-
 struct App<'a> {
     history: Vec<String>,
     notes: &'a mut NoteStore,
@@ -130,13 +110,10 @@ struct App<'a> {
     confirm_area: Rect,
     cancel_area: Rect,
     notice: Option<String>,
-    delete_sender: Sender<DeleteOutcome>,
-    delete_receiver: Receiver<DeleteOutcome>,
 }
 
 impl<'a> App<'a> {
     fn new(history: &'a [String], notes: &'a mut NoteStore, query: &str) -> Self {
-        let (delete_sender, delete_receiver) = mpsc::channel();
         let mut app = Self {
             history: history.to_vec(),
             notes,
@@ -157,8 +134,6 @@ impl<'a> App<'a> {
             confirm_area: Rect::default(),
             cancel_area: Rect::default(),
             notice: None,
-            delete_sender,
-            delete_receiver,
         };
         app.refresh();
         app
@@ -307,41 +282,33 @@ impl<'a> App<'a> {
     }
 
     fn start_delete(&mut self, command: &str) {
-        if let Some(history_index) = self.history.iter().position(|item| item == command) {
-            let filtered_index = self.selected;
-            let scroll_offset = self.scroll_offset;
-            let job = DeleteJob {
-                command: command.to_owned(),
-                history_index,
-                filtered_index,
-                scroll_offset,
-            };
-            self.remove_local(&job);
-            spawn_delete(job, self.delete_sender.clone());
-        }
+        let result = history::delete(&history_db(), command);
+        self.apply_delete(command, result);
     }
 
-    fn remove_local(&mut self, job: &DeleteJob) {
-        self.history.remove(job.history_index);
-        let had_previous = job.filtered_index > 0;
+    /// 删除失败时列表与选中项都不动，只把错误显示出来。
+    fn apply_delete(&mut self, command: &str, result: Result<(), String>) {
+        if let Err(error) = result {
+            self.notice = Some(error);
+            return;
+        }
+        let Some(history_index) = self.history.iter().position(|item| item == command) else {
+            return;
+        };
+
+        let filtered_index = self.selected;
+        let scroll_offset = self.scroll_offset;
+        self.history.remove(history_index);
         self.rebuild_filtered();
-        self.selected = if had_previous {
-            (job.filtered_index - 1).min(self.filtered.len().saturating_sub(1))
+        self.selected = if filtered_index > 0 {
+            (filtered_index - 1).min(self.filtered.len().saturating_sub(1))
         } else {
             0
         };
-        self.scroll_offset = job.scroll_offset.min(self.selected);
+        self.scroll_offset = scroll_offset.min(self.selected);
         self.clamp_scroll();
-    }
 
-    fn finish_delete(&mut self, outcome: DeleteOutcome) {
-        if let Err(error) = outcome.result {
-            let index = outcome.job.history_index.min(self.history.len());
-            self.history.insert(index, outcome.job.command);
-            self.rebuild_filtered();
-            self.selected = outcome.job.filtered_index;
-            self.scroll_offset = outcome.job.scroll_offset;
-            self.clamp_scroll();
+        if let Err(error) = self.notes.remove(command) {
             self.notice = Some(error);
         }
     }
@@ -409,10 +376,6 @@ fn event_loop(
 ) -> Result<PickResult, String> {
     let mut app = App::new(history, notes, query);
     loop {
-        let outcomes: Vec<DeleteOutcome> = app.delete_receiver.try_iter().collect();
-        for outcome in outcomes {
-            app.finish_delete(outcome);
-        }
         terminal
             .draw(|frame| render(frame, &mut app))
             .map_err(|error| format!("渲染界面失败: {error}"))?;
@@ -1269,7 +1232,10 @@ mod tests {
         let lines = screen(50, 8, "");
         // 测试数据按 Atuin 默认顺序排列：第一条最新。
         // 旧命令在上，最新命令紧贴输入行。
-        assert_eq!(lines[0], "\u{f044} 备注  \u{f0c5} 复制  \u{f014} 删除".to_owned());
+        assert_eq!(
+            lines[0],
+            "\u{f044} 备注  \u{f0c5} 复制  \u{f014} 删除".to_owned()
+        );
         assert_eq!(lines[1], "─".repeat(50));
         assert_eq!(lines[2], "uv run h.py".to_owned(), "{lines:?}");
         assert_eq!(lines[3], "atuin search --format json --limit 5".to_owned());
@@ -1386,12 +1352,7 @@ mod tests {
         assert_eq!(app.filtered, vec!["oldest", "middle", "newest"]);
         app.selected = 1;
         app.scroll_offset = 1;
-        app.remove_local(&DeleteJob {
-            command: "middle".to_owned(),
-            history_index: 1,
-            filtered_index: 1,
-            scroll_offset: 1,
-        });
+        app.apply_delete("middle", Ok(()));
         assert_eq!(app.filtered, vec!["oldest", "newest"]);
         assert_eq!(app.selected, 0);
         assert_eq!(app.selected_command(), Some("oldest"));
@@ -1408,12 +1369,7 @@ mod tests {
         let mut notes = NoteStore::default();
         let mut app = App::new(&history, &mut notes, "");
         assert_eq!(app.selected_command(), Some("newest"));
-        app.remove_local(&DeleteJob {
-            command: "newest".to_owned(),
-            history_index: 0,
-            filtered_index: 2,
-            scroll_offset: 0,
-        });
+        app.apply_delete("newest", Ok(()));
         assert_eq!(app.filtered, vec!["oldest", "middle"]);
         assert_eq!(app.selected_command(), Some("middle"));
     }
@@ -1429,17 +1385,12 @@ mod tests {
         let mut app = App::new(&history, &mut notes, "");
         app.selected = 0;
         assert_eq!(app.selected_command(), Some("oldest"));
-        app.remove_local(&DeleteJob {
-            command: "oldest".to_owned(),
-            history_index: 2,
-            filtered_index: 0,
-            scroll_offset: 0,
-        });
+        app.apply_delete("oldest", Ok(()));
         assert_eq!(app.selected_command(), Some("middle"));
     }
 
     #[test]
-    fn failed_delete_rolls_back_history_and_selection() {
+    fn failed_delete_keeps_the_list_and_selects_nothing() {
         let history = vec![
             "newest".to_owned(),
             "middle".to_owned(),
@@ -1449,22 +1400,30 @@ mod tests {
         let mut app = App::new(&history, &mut notes, "");
         app.selected = 1;
         app.scroll_offset = 1;
-        let job = DeleteJob {
-            command: "middle".to_owned(),
-            history_index: 1,
-            filtered_index: 1,
-            scroll_offset: 1,
-        };
-        app.remove_local(&job);
-        app.finish_delete(DeleteOutcome {
-            job,
-            result: Err("failed".to_owned()),
-        });
+        app.apply_delete("middle", Err("failed".to_owned()));
         assert_eq!(app.filtered, vec!["oldest", "middle", "newest"]);
         assert_eq!(app.selected_command(), Some("middle"));
         assert_eq!(app.scroll_offset, 1);
-        assert!(app.notice.is_some());
+        assert_eq!(app.notice.as_deref(), Some("failed"));
     }
+
+    #[test]
+    fn deleting_a_noted_command_removes_the_note() {
+        let history = vec!["dir".to_owned(), "ls".to_owned()];
+        let mut notes = notes_for_test("delete-note");
+        notes.set("dir", "list files").unwrap();
+        let mut app = App::new(&history, &mut notes, "");
+        app.selected = 1;
+
+        app.apply_delete("dir", Ok(()));
+        assert_eq!(app.filtered, vec!["ls"]);
+        assert!(app.notice.is_none());
+
+        let reloaded = NoteStore::load_from(app.notes.path_for_test().unwrap()).unwrap();
+        assert_eq!(reloaded.len(), 0, "备注应一并删除");
+        remove_test_notes(&notes);
+    }
+
     #[test]
     fn renders_note_modal_over_the_list() {
         let history = vec!["cargo test".to_owned()];
