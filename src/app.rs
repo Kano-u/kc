@@ -1,41 +1,8 @@
+use crate::data_paths::DataPaths;
 use crate::history;
 use crate::notes::NoteStore;
 use crate::tui;
 use regex::Regex;
-use std::path::PathBuf;
-
-fn env_dir(name: &str) -> Option<PathBuf> {
-    std::env::var_os(name)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-}
-
-pub(crate) fn home_dir() -> PathBuf {
-    if let Some(home) = std::env::var_os("USERPROFILE") {
-        return PathBuf::from(home);
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home);
-    }
-    PathBuf::from(".")
-}
-
-fn config_dir() -> PathBuf {
-    if let Some(dir) = env_dir("KC_CONFIG_DIR") {
-        return dir;
-    }
-    if cfg!(windows) {
-        home_dir().join(".config").join("kc")
-    } else if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME") {
-        PathBuf::from(dir).join("kc")
-    } else {
-        home_dir().join(".config").join("kc")
-    }
-}
-
-pub fn data_paths() -> Result<crate::data_paths::DataPaths, String> {
-    crate::data_paths::resolve(&config_dir())
-}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -54,19 +21,20 @@ impl Default for Config {
 
 impl Config {
     pub fn load() -> Result<Self, String> {
-        let paths = data_paths()?;
-        Ok(Self::load_from(&paths.config))
+        let paths = DataPaths::load()?;
+        Ok(Self::load_from(&paths.config()))
     }
 
     fn load_from(path: &std::path::Path) -> Self {
+        let default = Self::default();
         let Ok(text) = std::fs::read_to_string(path) else {
-            return Self::default();
+            return default;
         };
         let value: toml::Value = match toml::from_str(&text) {
             Ok(value) => value,
             Err(error) => {
                 eprintln!("配置文件解析失败，使用默认设置: {error}");
-                return Self::default();
+                return default;
             }
         };
         Self {
@@ -74,7 +42,7 @@ impl Config {
                 .get("history_limit")
                 .and_then(|value| value.as_integer())
                 .and_then(|value| u32::try_from(value).ok())
-                .unwrap_or(5000),
+                .unwrap_or(default.history_limit),
             filters: parse_filters(value.get("filter")),
         }
     }
@@ -104,36 +72,21 @@ fn parse_filters(value: Option<&toml::Value>) -> Vec<Regex> {
 }
 
 pub fn run(query: Option<&str>) -> std::process::ExitCode {
-    let config = match Config::load() {
-        Ok(config) => config,
-        Err(error) => {
-            eprintln!("{error}");
-            return std::process::ExitCode::FAILURE;
-        }
-    };
-    let query = query.unwrap_or_default();
-    let history = match history::load(&crate::data_paths::history_db(), &config) {
-        Ok(history) => history,
-        Err(error) => {
-            eprintln!("{error}");
-            return std::process::ExitCode::FAILURE;
-        }
-    };
-    let mut notes = match NoteStore::load() {
-        Ok(notes) => notes,
-        Err(error) => {
-            eprintln!("{error}");
-            return std::process::ExitCode::FAILURE;
-        }
-    };
-
-    match tui::run(query, &history, &mut notes) {
+    match run_main(query.unwrap_or_default()) {
         Ok(_) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+/// 裸 `kc` 与 `kc pick` 唯一的数据加载入口，两者只在结果如何输出上不同。
+pub fn run_main(query: &str) -> Result<crate::tui::PickResult, String> {
+    let config = Config::load()?;
+    let history = history::load(&crate::data_paths::history_db()?, &config)?;
+    let mut notes = NoteStore::load()?;
+    tui::run(query, &history, &mut notes)
 }
 
 #[cfg(test)]
@@ -168,21 +121,5 @@ mod tests {
         assert!(config.filtered("echo secret"));
         assert!(!config.filtered("dirty"));
         assert!(!Config::default().filtered("echo token=abc"));
-    }
-
-    #[test]
-    fn empty_environment_paths_are_ignored() {
-        assert_eq!(env_dir("KC_TEST_UNSET_PATH"), None);
-        std::env::set_var("KC_TEST_EMPTY_PATH", "");
-        assert_eq!(env_dir("KC_TEST_EMPTY_PATH"), None);
-        std::env::remove_var("KC_TEST_EMPTY_PATH");
-    }
-
-    #[test]
-    fn environment_path_is_used_verbatim() {
-        let path = std::env::temp_dir().join("kc-environment-path-test");
-        std::env::set_var("KC_TEST_CONFIG_DIR", &path);
-        assert_eq!(env_dir("KC_TEST_CONFIG_DIR"), Some(path));
-        std::env::remove_var("KC_TEST_CONFIG_DIR");
     }
 }

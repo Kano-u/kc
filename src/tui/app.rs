@@ -228,7 +228,7 @@ impl<'a> App<'a> {
     }
 
     pub(super) fn start_delete(&mut self, command: &str) {
-        let result = history::delete(&history_db(), command);
+        let result = history_db().and_then(|path| history::delete(&path, command));
         self.apply_delete(command, result);
     }
 

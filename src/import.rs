@@ -38,7 +38,7 @@ fn run() -> Result<(PathBuf, usize), String> {
     });
 
     let commands = parse(&text, &config);
-    let count = history::import(&history_db(), &commands)?;
+    let count = history::import(&history_db()?, &commands)?;
     Ok((path, count))
 }
 
@@ -56,7 +56,8 @@ fn powershell_history() -> Result<PathBuf, String> {
 }
 
 /// PSReadLine 的历史文件一行一条命令；行尾的反引号表示续行，读回时还原成换行符。
-/// 空的续行、全空白行都不是命令；命中的 filter 不入库；重复的命令保留最后一次出现的位置。
+/// 空的续行、全空白行都不是命令；命中的 filter 不入库。
+/// 去重交给历史表的主键，这里不做。
 fn parse(text: &str, config: &Config) -> Vec<String> {
     let mut commands = Vec::new();
     let mut pending = String::new();
@@ -72,7 +73,7 @@ fn parse(text: &str, config: &Config) -> Vec<String> {
             pending.clear();
         }
     }
-    dedup_keeping_last(commands)
+    commands
 }
 
 fn push(commands: &mut Vec<String>, command: &str, config: &Config) {
@@ -80,17 +81,6 @@ fn push(commands: &mut Vec<String>, command: &str, config: &Config) {
     if !command.is_empty() && !config.filtered(command) {
         commands.push(command.to_owned());
     }
-}
-
-fn dedup_keeping_last(commands: Vec<String>) -> Vec<String> {
-    let mut unique: Vec<String> = Vec::new();
-    for command in commands.into_iter().rev() {
-        if !unique.contains(&command) {
-            unique.push(command);
-        }
-    }
-    unique.reverse();
-    unique
 }
 
 #[cfg(test)]
@@ -139,9 +129,8 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_commands_keep_the_last_position() {
-        let commands = parse("a\nb\na\n", &Config::default());
-        assert_eq!(commands, vec!["b", "a"]);
+    fn keeps_duplicates_for_the_database_to_collapse() {
+        assert_eq!(parse("a\nb\na\n", &Config::default()), vec!["a", "b", "a"]);
     }
 
     #[test]

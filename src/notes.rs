@@ -1,4 +1,4 @@
-use crate::app::data_paths;
+use crate::data_paths::DataPaths;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufWriter, Write};
@@ -20,8 +20,8 @@ pub struct NoteStore {
 
 impl NoteStore {
     pub fn load() -> Result<Self, String> {
-        let paths = data_paths()?;
-        Self::load_from_paths(&paths.read_notes, &paths.write_notes)
+        let paths = DataPaths::load()?;
+        Self::load_from_paths(&paths.read_notes()?, &paths.write_notes())
     }
 
     #[cfg(test)]

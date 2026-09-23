@@ -104,9 +104,9 @@ filter = [
 
 上面的 `^dir$` 和 `^ls -la$` 只过滤完全相同的命令；`secret` 会过滤任何包含该文字的命令。
 
-### 自定义配置与数据目录
+### 配置与数据目录
 
-设置 `KC_CONFIG_DIR` 后，kc 从该目录查找 `.host`、`*.config.toml` 和 `*.notes.jsonl`。未设置时使用 `~/.config/kc`。
+kc 不猜测默认位置，`KC_CONFIG_DIR` 必须设置。kc 从该目录查找 `.host`、`*.config.toml` 和 `*.notes.jsonl`。未设置时直接报错退出。
 
 ```bash
 export KC_CONFIG_DIR="$HOME/kc"

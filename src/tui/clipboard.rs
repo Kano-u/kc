@@ -46,47 +46,35 @@ pub(super) fn copy_to_clipboard(text: &str) -> Result<(), String> {
         Ok(())
     }
 
+    /// Termux 是唯一的非 Windows 目标，只认这一个命令，不装就报错。
     #[cfg(not(windows))]
     {
         use std::io::Write;
         use std::process::{Command, Stdio};
 
-        let candidates: &[(&str, &[&str])] = &[
-            ("wl-copy", &[]),
-            ("xclip", &["-selection", "clipboard"]),
-            ("xsel", &["--clipboard", "--input"]),
-            ("termux-clipboard-set", &[]),
-            ("pbcopy", &[]),
-        ];
-        let mut last_error = None;
-        for (program, args) in candidates {
-            let mut child = match Command::new(program)
-                .args(*args)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-            {
-                Ok(child) => child,
-                Err(error) => {
-                    last_error = Some(error.to_string());
-                    continue;
-                }
-            };
-            if let Some(mut stdin) = child.stdin.take() {
-                if stdin.write_all(text.as_bytes()).is_err() {
-                    continue;
-                }
-            }
-            match child.wait() {
-                Ok(status) if status.success() => return Ok(()),
-                Ok(status) => last_error = Some(status.to_string()),
-                Err(error) => last_error = Some(error.to_string()),
-            }
-        }
-        Err(match last_error {
-            Some(error) => format!("复制失败: {error}"),
-            None => "复制失败: 未找到可用的剪贴板工具。".to_owned(),
-        })
+        const PROGRAM: &str = "termux-clipboard-set";
+        let mut child = Command::new(PROGRAM)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| format!("复制失败: 无法启动 {PROGRAM}: {error}"))?;
+
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| format!("复制失败: 无法写入 {PROGRAM}。"))?;
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|error| format!("复制失败: 写入 {PROGRAM} 出错: {error}"))?;
+        drop(stdin);
+
+        let status = child
+            .wait()
+            .map_err(|error| format!("复制失败: 等待 {PROGRAM} 出错: {error}"))?;
+        status
+            .success()
+            .then_some(())
+            .ok_or_else(|| format!("复制失败: {PROGRAM} 以 {status} 退出。"))
     }
 }

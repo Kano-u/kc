@@ -14,7 +14,8 @@ const USAGE: &str = "kc - Shell 历史记录笔记与搜索
 
 用法:
   kc                      启动 TUI
-  kc pick --query QUERY   为 shell 集成启动 TUI；输出一条 JSON 结果
+  kc pick --query-env NAME --result-file-env NAME
+                          为 shell 集成启动 TUI；结果写入文件（未给则为 JSON）
   kc record --command-env NAME
                           将命令记录到 NAME 环境变量中
   kc import powershell    将 PowerShell 历史记录导入数据库
@@ -22,7 +23,7 @@ const USAGE: &str = "kc - Shell 历史记录笔记与搜索
   kc --help               显示此帮助
 
 环境变量:
-  KC_CONFIG_DIR           覆盖 kc 的配置/数据目录
+  KC_CONFIG_DIR           配置/数据目录，必须设置
   KC_RECORD               命令成功时设为 1，否则为 0
 ";
 

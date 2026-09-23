@@ -25,7 +25,7 @@ fn record(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    history::upsert(&history_db(), &command, succeeded())
+    history::upsert(&history_db()?, &command, succeeded())
 }
 
 /// 只认 `--command-env NAME` 这一种写法，多余或缺失的参数都是用法错误。
