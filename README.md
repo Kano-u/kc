@@ -5,7 +5,7 @@
 ## 功能
 
 - 输入命令前缀时，命令行下方列出匹配的 kc 历史与备注（PowerShell 集成）
-- 向上箭头打开 TUI
+- 预览列表里有选中项时，`↑`/`↓` 在列表里移动；没有选中项时 `↑` 打开 TUI
 - 顶部工具栏提供“备注”、“复制”和“删除”，也可点击操作
 - 底部搜索，实时过滤命令和备注
 - `Enter` 执行选中命令
@@ -61,17 +61,24 @@ kc init --shell powershell | Out-String | Invoke-Expression
 - 预测器是编译成 DLL 的 C#，不是 PowerShell 脚本。这不是偏好：PSReadLine 把预测器放在没有 runspace 的线程池线程上跑，只给 20 ms 预算，解释执行的脚本两边都过不了
 - 首次执行 `kc init` 时会编译一次，约 450 ms；DLL 缓存在 `~/.kc/KcPreviewPredictor-<PowerShell 版本>.dll`，之后启动只读它。升级 kc 后要删掉这个 DLL 才会重新编译
 - 升级 kc 后需要重新执行上面的 `kc init` 才会生效
+- `↓` 进入候选列表并在列表内下移，`↑` 在已选中时上移；没有任何选中项时 `↑` 才打开 kc TUI。判断选中状态需要 `prediction-selection` 补丁，见下一节
 - `F2` 在 Inline 与 ListView 之间切换，预览默认用 ListView
 
-**备注要显示在每行候选后面，需要给 PSReadLine 打补丁**，见下一节。不打补丁时备注只出现在选中项的下方，需要先按 `↑`/`↓` 选中才看得到——这是 PSReadLine 的行为：命中备注的字段是 `ToolTip`，而它只在候选被选中时才渲染。
+**必须给 PSReadLine 打补丁**，见下一节。补丁提供两件事：
 
-### 每行显示备注（kc psreadline-patch）
+- 备注显示在每行候选后面。不打补丁时备注只在选中项的下方，需要先选中才看得到——这是 PSReadLine 的行为：命中备注的字段是 `ToolTip`，而它只在候选被选中时才渲染
+- `HasPredictionSelection()` 只读 API。`↑` 靠它分辨「预览里有选中项」，没有它 `↑` 会直接报错。
+
+### 打补丁（kc psreadline-patch）
 
 ```powershell
 kc psreadline-patch
 ```
 
-会在本机把 [Kano-u/PSReadLine-Patch](https://github.com/Kano-u/PSReadLine-Patch) 的补丁应用到当前 PSReadLine 上，让候选行尾部的 `[来源]` 位置显示备注：
+会在本机把 [Kano-u/PSReadLine-Patch](https://github.com/Kano-u/PSReadLine-Patch) 的补丁应用到当前 PSReadLine 上：
+
+- `note-column`：让候选行尾部的 `[来源]` 位置显示备注
+- `prediction-selection`：`HasPredictionSelection()` 只读 API，让 kc 能分辨「预览里有选中项」
 
 ```
 PS D:\> npx

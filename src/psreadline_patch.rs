@@ -10,7 +10,11 @@ const ALLOWED: &[&str] = &[];
 const UPSTREAM: &str = "https://github.com/PowerShell/PSReadLine.git";
 /// 补丁单独一个仓库：PSReadLine 的补丁与 kc 的版本演进互不相干。
 const PATCH_REPO: &str = "https://github.com/Kano-u/PSReadLine-Patch.git";
-const PATCH_FILE: &str = "patches/note-column.patch";
+/// 按顺序应用。每个补丁各自独立、互不重叠，所以能叠在同一份上游源码上。
+const PATCH_FILES: &[&str] = &[
+    "patches/note-column.patch",
+    "patches/prediction-selection.patch",
+];
 
 /// 问本机 pwsh：要打补丁的 PSReadLine 版本，以及用户模块目录。
 /// 用 `Import-Module` 而不是 `Get-Module -ListAvailable`，因为要的就是启动时真正会加载的那一份。
@@ -70,8 +74,10 @@ fn run() -> Result<String, String> {
     )?;
 
     eprintln!("应用补丁 …");
-    let patch = patches.join(PATCH_FILE).to_string_lossy().into_owned();
-    run_command("git", &["apply", &patch], Some(&upstream))?;
+    for file in PATCH_FILES {
+        let patch = patches.join(file).to_string_lossy().into_owned();
+        run_command("git", &["apply", &patch], Some(&upstream))?;
+    }
 
     eprintln!("编译（约一分钟）…");
     publish(&upstream)?;
@@ -266,6 +272,13 @@ mod tests {
     fn a_short_answer_is_an_error_not_a_guess() {
         assert!(parse_target("").is_err());
         assert!(parse_target("2.4.5\n").is_err());
+    }
+
+    #[test]
+    fn applies_every_patch_in_the_repository() {
+        // 每个补丁各自独立、互不重叠，必须全部应用；漏掉一个就会静默丢功能。
+        assert!(PATCH_FILES.contains(&"patches/note-column.patch"));
+        assert!(PATCH_FILES.contains(&"patches/prediction-selection.patch"));
     }
 
     #[test]

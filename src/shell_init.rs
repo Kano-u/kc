@@ -187,10 +187,17 @@ Set-PSReadLineKeyHandler -Chord UpArrow -BriefDescription "Runs kc history picke
     $line = $null
     [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$null)
 
-    if (!$line.Contains("`n")) {
-        Invoke-KcPick
-    } else {
+    if ($line.Contains("`n")) {
         [Microsoft.PowerShell.PSConsoleReadLine]::PreviousLine()
+    }
+    elseif ([Microsoft.PowerShell.PSConsoleReadLine]::HasPredictionSelection()) {
+        # A kc candidate is selected in the prediction list, so 'UpArrow' navigates that
+        # list -- exactly what the PSReadLine default does. Opening the picker here would
+        # throw the selection away on the keystroke meant to move within it.
+        [Microsoft.PowerShell.PSConsoleReadLine]::PreviousSuggestion()
+    }
+    else {
+        Invoke-KcPick
     }
 }
 "#;
@@ -501,9 +508,26 @@ mod tests {
     }
 
     #[test]
-    fn keeps_the_arrow_key_picker() {
-        assert!(POWERSHELL.contains("function global:Invoke-KcPick"));
-        assert!(POWERSHELL.contains("Set-PSReadLineKeyHandler -Chord UpArrow"));
+    fn up_arrow_navigates_the_preview_before_opening_the_picker() {
+        let handler = POWERSHELL
+            .split_once("-Chord UpArrow")
+            .expect("UpArrow 处理函数缺失")
+            .1;
+        let previous = handler
+            .find("PreviousSuggestion")
+            .expect("没有在预览列表里上移的分支");
+        let picker = handler.find("Invoke-KcPick").expect("没有开 kc 的分支");
+
+        // 预览里已有选中项时不能开 kc，否则用户按 ↑ 想上移却被丢进 TUI。
+        assert!(
+            handler.contains("HasPredictionSelection()"),
+            "↑ 必须先问预览有没有选中项"
+        );
+        assert!(previous < picker, "↑ 必须先处理预览选中，再考虑开 kc");
+        assert!(
+            handler.contains("PreviousLine()"),
+            "多行命令仍要走 PreviousLine"
+        );
     }
 
     #[test]
