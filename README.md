@@ -58,11 +58,14 @@ kc init --shell powershell | Out-String | Invoke-Expression
 - 缓存文件里最新执行过的命令排在最前，所以输入前缀时拿到的是**最近用过的**匹配命令
 - 预测器只在缓存文件变化时重读；`kc record` 每次记录后都会刷新它，也可以手动执行 `kc export`
 - 只有单行、不含 TAB 的命令会被导出：接受建议时插入的是缓存文件原文，多行命令没法原样插入，这类命令留给 TUI
+- 匹配是**前缀匹配**（`StartsWith(输入, OrdinalIgnoreCase)`，忽略大小写），跟 PSReadLine 自己的历史预测一致；子串匹配暂不做
+- 候选最多 10 条
 - 预测器是编译成 DLL 的 C#，不是 PowerShell 脚本。这不是偏好：PSReadLine 把预测器放在没有 runspace 的线程池线程上跑，只给 20 ms 预算，解释执行的脚本两边都过不了
-- 首次执行 `kc init` 时会编译一次，约 450 ms；DLL 缓存在 `~/.kc/KcPreviewPredictor-<PowerShell 版本>.dll`，之后启动只读它。升级 kc 后要删掉这个 DLL 才会重新编译
+- 首次执行 `kc init` 时会编译一次，约 450 ms；DLL 缓存在 `~/.kc/KcPreviewPredictor-<PowerShell 版本>.dll`，之后启动只读它。**升级 kc 或 PowerShell 后都要删掉这个 DLL 才会重新编译**：程序集绑到具体的 SMA 版本，版本变了旧 DLL 用不了
 - 升级 kc 后需要重新执行上面的 `kc init` 才会生效
 - `↓` 进入候选列表并在列表内下移，`↑` 在已选中时上移；没有任何选中项时 `↑` 才打开 kc TUI。判断选中状态需要 `prediction-selection` 补丁，见下一节
 - `F2` 在 Inline 与 ListView 之间切换，预览默认用 ListView
+- 预测源的选项必须是 `Plugin`，不能改成 `HistoryAndPlugin`：PSReadLine 会滤掉与 History 源完全相同的建议，kc 的候选会被历史源顶掉，列表直接变空
 
 **必须给 PSReadLine 打补丁**，见下一节。补丁提供两件事：
 
@@ -90,6 +93,9 @@ PS D:\> npx
 ```
 
 - 需要 `git` 和 `dotnet` SDK。命令会自动问 pwsh 要当前 PSReadLine 版本与用户模块目录，然后拉取对应上游标签、应用补丁、本机编译、装进用户模块目录，最后新开一个 pwsh 验证是否真的加载到了补丁版
+- 两个补丁各自独立、互不重叠，所以能叠在同一份上游源码上；改 `PATCH_FILES` 加补丁即可
+- 构建目录 `~/.kc/psreadline` 每次运行整个重建
+- **装之前必须关掉所有加载了 profile 的 PowerShell 窗口**：已加载的 DLL 在 Windows 上被锁住，覆盖必然失败。命令会先探测文件锁，有占用就整体拒绝并列出文件，不会留下半残的模块目录（非交互式的 `pwsh -File` 脚本不加载 profile，不会锁）
 - 补丁只装进当前用户的模块目录，不动系统目录，也不需要管理员权限
 - **升级 PowerShell 后要重跑一次**：PSReadLine 随 PowerShell 一起升级，版本号变了就得对着新版本重新打一次
 - 装完要重启 PowerShell 窗口才生效
