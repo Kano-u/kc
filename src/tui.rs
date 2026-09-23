@@ -191,23 +191,13 @@ impl<'a> App<'a> {
         self.list_area.height.max(1) as usize
     }
 
-    /// 选中项在屏幕上停留的上下留白，让它停在列表的中段（1/5 到 4/5 之间）。
-    fn scroll_margin(&self) -> usize {
-        self.visible_height() / 5
-    }
-
-    /// 选中项停在中段内时滚动位置不动，越过中段才跟着滚动；
-    /// 到达最旧或最新命令时列表顶到底，选中项随之贴顶或贴底。
     fn clamp_scroll(&mut self) {
         let height = self.visible_height();
-        let margin = self.scroll_margin();
-        // 中段即从列表顶部数 margin 行到 height - 1 - margin 行。
-        let top_row = margin;
-        let bottom_row = height.saturating_sub(1).saturating_sub(margin).max(top_row);
-        let highest = self.selected.saturating_sub(top_row);
-        let lowest = self.selected.saturating_sub(bottom_row);
-        let offset = self.scroll_offset.clamp(lowest, highest);
-        self.scroll_offset = offset.min(self.filtered.len().saturating_sub(height));
+        if self.selected < self.scroll_offset {
+            self.scroll_offset = self.selected;
+        } else if self.selected >= self.scroll_offset + height {
+            self.scroll_offset = self.selected + 1 - height;
+        }
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -1293,37 +1283,6 @@ mod tests {
     }
 
     #[test]
-    fn selection_settles_on_the_band_after_scrolling_up() {
-        let history: Vec<String> = (0..30).map(|index| format!("cmd {index}")).collect();
-        let mut notes = NoteStore::default();
-        let mut app = App::new(&history, &mut notes, "");
-        let mut terminal = Terminal::new(TestBackend::new(40, 11)).unwrap();
-        for _ in 0..10 {
-            app.move_selection(-1);
-        }
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        // 列表区域高 8 行、留白 1 行，向上滚时选中项停在第 2 行，不会再往上跑。
-        assert_eq!(app.list_area.height, 8);
-        assert_eq!(app.selected, 19);
-        assert_eq!(app.selected - app.scroll_offset, 1);
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        assert_eq!(app.selected - app.scroll_offset, 1);
-    }
-
-    #[test]
-    fn selection_rests_on_the_lower_band_edge_while_scrolling_down() {
-        let history: Vec<String> = (0..30).map(|index| format!("cmd {index}")).collect();
-        let mut notes = NoteStore::default();
-        let mut app = App::new(&history, &mut notes, "");
-        let mut terminal = Terminal::new(TestBackend::new(40, 11)).unwrap();
-        app.selected = 15;
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        // 列表区域高 8 行，滚动后选中项停在第 7 行（4/5 边界）。
-        assert_eq!(app.list_area.height, 8);
-        assert_eq!(app.selected - app.scroll_offset, 6);
-    }
-
-    #[test]
     fn keeps_the_newest_entries_at_the_bottom_when_scrolling() {
         let lines = screen(40, 4, "json");
         // 过滤命中一条时仍靠底部显示，紧贴输入行。
@@ -1414,96 +1373,6 @@ mod tests {
         assert_eq!(app.selected_command(), Some("older"));
         assert!(app.move_down());
         assert_eq!(app.selected_command(), Some("newest"));
-    }
-
-    fn app_with_lines(lines: usize, height: u16) -> App<'static> {
-        let history: &'static [String] = Box::leak(
-            (0..lines)
-                .map(|index| format!("cmd {index}"))
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        );
-        let notes: &'static mut NoteStore = Box::leak(Box::new(NoteStore::default()));
-        let mut app = App::new(history, notes, "");
-        app.list_area = Rect {
-            x: 0,
-            y: 0,
-            width: 40,
-            height,
-        };
-        app.selected = 0;
-        app.scroll_offset = 0;
-        app
-    }
-
-    /// 选中项相对列表顶部的行号；列表不满一屏时按底部对齐换算。
-    fn selected_row(app: &App) -> usize {
-        let height = app.visible_height();
-        let offset = app.scroll_offset;
-        (height - (app.filtered.len() - offset).min(height)) + (app.selected - offset)
-    }
-
-    #[test]
-    fn selection_holds_its_row_while_scrolling_through_the_middle() {
-        let mut app = app_with_lines(30, 9);
-        // 列表高 9 行、留白 1 行：窗口不动时选中项能走到第 8 行，之后再跟着滚动。
-        for row in 1..=7 {
-            app.move_selection(1);
-            assert_eq!(app.scroll_offset, 0);
-            assert_eq!(selected_row(&app), row);
-        }
-        for _ in 0..14 {
-            app.move_selection(1);
-            assert_eq!(selected_row(&app), 7);
-            assert_eq!(app.scroll_offset, app.selected - 7);
-        }
-    }
-
-    #[test]
-    fn selection_parks_on_the_upper_band_edge_when_scrolling_back_up() {
-        let mut app = app_with_lines(30, 9);
-        app.selected = 15;
-        app.clamp_scroll();
-        assert_eq!(selected_row(&app), 7);
-        for _ in 0..10 {
-            app.move_selection(-1);
-        }
-        // 向上滚时选中项停在第 2 行（1/5 边界），只有走到最旧命令才贴顶。
-        assert_eq!(app.selected, 5);
-        assert_eq!(selected_row(&app), 1);
-        while app.selected > 0 {
-            app.move_selection(-1);
-            let expected = if app.selected == 0 { 0 } else { 1 };
-            assert_eq!(selected_row(&app), expected, "selected={}", app.selected);
-        }
-    }
-
-    #[test]
-    fn oldest_and_newest_still_hug_the_edges() {
-        let mut app = app_with_lines(30, 9);
-        app.move_selection(-1);
-        assert_eq!(app.selected, 0);
-        assert_eq!(app.scroll_offset, 0);
-        assert_eq!(app.selected - app.scroll_offset, 0);
-
-        let newest = app.filtered.len() - 1;
-        for _ in 0..app.filtered.len() {
-            app.move_selection(1);
-        }
-        assert_eq!(app.selected, newest);
-        assert_eq!(app.scroll_offset, newest + 1 - 9);
-        assert_eq!(app.selected - app.scroll_offset, 8);
-    }
-
-    #[test]
-    fn short_lists_stay_glued_to_the_bottom() {
-        let mut app = app_with_lines(3, 8);
-        app.selected = app.filtered.len() - 1;
-        app.clamp_scroll();
-        assert_eq!(app.scroll_offset, 0);
-        assert_eq!(app.list_top(), 5);
-        app.move_selection(-1);
-        assert_eq!(app.scroll_offset, 0);
     }
     #[test]
     fn deleting_middle_entry_keeps_selection_on_the_same_row() {
