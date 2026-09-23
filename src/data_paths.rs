@@ -112,9 +112,12 @@ mod tests {
     fn history_database_lives_outside_the_sync_directory() {
         let path = history_db();
         assert!(path.ends_with(Path::new(".kc").join("history.db")));
-        std::env::set_var("KC_CONFIG_DIR", temp_dir("history-isolated"));
+        let config = temp_dir("history-isolated");
+        std::env::set_var("KC_CONFIG_DIR", &config);
         assert_eq!(history_db(), path);
+        assert!(!path.starts_with(&config), "{}", path.display());
         std::env::remove_var("KC_CONFIG_DIR");
+        std::fs::remove_dir_all(config).unwrap();
     }
 
     #[test]
