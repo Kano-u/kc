@@ -1,8 +1,13 @@
 use crate::args;
+use crate::data_paths::preview_cache;
+use std::path::Path;
 use std::process::ExitCode;
 
 const USAGE: &str = "kc init --shell powershell";
 const ALLOWED: &[&str] = &["--shell"];
+
+/// 缓存文件的绝对路径在运行时替换进来：脚本本体是编译期常量，必须保持纯 ASCII。
+const PREVIEW_PATH: &str = "@KC_PREVIEW_PATH@";
 
 pub fn main(args: &[String]) -> ExitCode {
     let values = match args::parse(args, ALLOWED) {
@@ -13,15 +18,31 @@ pub fn main(args: &[String]) -> ExitCode {
         }
     };
     match values.get("--shell").map(String::as_str) {
-        Some("powershell") => {
-            print!("{POWERSHELL}");
-            ExitCode::SUCCESS
-        }
+        Some("powershell") => match rendered() {
+            Ok(script) => {
+                print!("{script}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("kc init: {error}");
+                ExitCode::FAILURE
+            }
+        },
         _ => {
             eprintln!("只支持 --shell powershell。\n用法: {USAGE}");
             ExitCode::from(2)
         }
     }
+}
+
+fn rendered() -> Result<String, String> {
+    Ok(script(&preview_cache()?))
+}
+
+/// 路径写进 PowerShell 单引号字符串：反斜杠不被解释，路径里的单引号写成两个。
+fn script(path: &Path) -> String {
+    let literal = path.to_string_lossy().replace('\'', "''");
+    POWERSHELL.replace(PREVIEW_PATH, &literal)
 }
 
 /// 这份脚本必须保持纯 ASCII：它经 `kc init --shell powershell | Invoke-Expression`
@@ -31,6 +52,7 @@ const POWERSHELL: &str = r#"# Keep this block as the last statement of the profi
 # It defines global:prompt, so any prompt defined after it would win
 # and commands would silently stop reaching the history database.
 
+$global:KcPreviewPath = '@KC_PREVIEW_PATH@'
 $global:KcLastId = -1
 
 function global:prompt {
@@ -114,6 +136,21 @@ mod tests {
             POWERSHELL.is_ascii(),
             "脚本含非 ASCII 字节，管道解码会破坏它"
         );
+    }
+
+    #[test]
+    fn writes_the_preview_cache_path_as_a_single_quoted_literal() {
+        let path = Path::new(r"C:\Users\k\.kc\preview.tsv");
+        let output = script(path);
+        assert!(output.contains(r"$global:KcPreviewPath = 'C:\Users\k\.kc\preview.tsv'"));
+        assert!(!output.contains(PREVIEW_PATH), "占位符没有被替换");
+        assert!(output.is_ascii());
+    }
+
+    #[test]
+    fn doubles_single_quotes_in_the_preview_path() {
+        let output = script(Path::new("/tmp/it's/preview.tsv"));
+        assert!(output.contains("$global:KcPreviewPath = '/tmp/it''s/preview.tsv'"));
     }
 
     #[test]
