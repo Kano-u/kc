@@ -3,6 +3,7 @@ mod data_paths;
 mod history;
 mod notes;
 mod pick;
+mod record;
 mod shell_init;
 mod tui;
 
@@ -13,12 +14,15 @@ const USAGE: &str = "kc - Shell history notes and search
 Usage:
   kc                      Start the TUI
   kc pick --query QUERY   Start TUI for shell integration; emit one JSON result
+  kc record --command-env NAME
+                          Record the command in the NAME environment variable
   kc init powershell      Print the PowerShell integration
   kc init bash            Print the Bash/Termux integration
   kc --help               Show this help
 
 Environment:
   KC_CONFIG_DIR           Override the kc config/data directory
+  KC_RECORD               Set to 1 when the command succeeded, otherwise 0
 ";
 
 fn main() -> ExitCode {
@@ -31,6 +35,7 @@ fn main() -> ExitCode {
         }
         Some("init") => shell_init::print(args.get(1).map(String::as_str)),
         Some("pick") => pick::main(&args[1..]),
+        Some("record") => record::main(&args[1..]),
         Some(_) => {
             eprintln!("未知命令。使用 kc --help 查看用法。");
             ExitCode::from(2)
