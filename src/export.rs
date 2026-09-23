@@ -40,9 +40,12 @@ pub fn refresh() -> Result<(PathBuf, usize), String> {
 
 /// 一行一条，`命令\t备注`。命令原样保留 —— 接受建议时插入的就是这里的原文，
 /// 所以含换行或 TAB 的命令整条跳过，绝不压平（压平等于改写成另一条命令）。
+///
+/// 输入是 `history::load` 的顺序（最旧在上），输出反过来：预测器只取前 10 条，
+/// 顺序直接决定拿到哪 10 条，只有最近的命令值得预览。
 fn render(history: &[String], notes: &NoteStore) -> Vec<String> {
     let mut lines = Vec::with_capacity(history.len());
-    for command in history {
+    for command in history.iter().rev() {
         if command.contains(['\n', '\r', '\t']) {
             continue;
         }
@@ -121,9 +124,9 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "echo \"中文 \\ 路径\"\t",
-                "cargo test\t运行测试",
                 "git status\t",
+                "cargo test\t运行测试",
+                "echo \"中文 \\ 路径\"\t",
             ]
         );
         std::fs::remove_dir_all(dir).unwrap();
@@ -138,6 +141,16 @@ mod tests {
             &store,
         );
         assert_eq!(lines, vec!["ls\t"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn writes_the_most_recent_commands_first() {
+        // 预测器只取前 10 条：文件里排在后面的命令等于不存在。
+        let dir = temp_dir("order");
+        let store = notes(&dir.join("com.notes.jsonl"), &[]);
+        let lines = render(&commands(&["oldest", "older", "newest"]), &store);
+        assert_eq!(lines, vec!["newest\t", "older\t", "oldest\t"]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

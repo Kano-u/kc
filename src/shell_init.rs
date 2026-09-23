@@ -201,8 +201,10 @@ Set-PSReadLineKeyHandler -Chord UpArrow -BriefDescription "Runs kc history picke
 const PREDICTOR: &str = r#"public sealed class KcPreviewPredictor : System.Management.Automation.Subsystem.Prediction.ICommandPredictor
 {
     private readonly string _path;
-    private readonly System.Collections.Generic.Dictionary<string, string> _entries =
-        new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.Ordinal);
+    // 顺序即优先级：缓存文件里最新的命令排在最上面，所以按顺序取前 10 条就是最近用过的 10 条。
+    // 不能用字典 —— 字典不保证迭代顺序，候选会退化成随机 10 条。
+    private readonly System.Collections.Generic.List<System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion> _entries =
+        new System.Collections.Generic.List<System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion>();
     private System.DateTime _stamp = System.DateTime.MinValue;
     private readonly System.Collections.Generic.List<System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion> _list;
     private readonly System.Management.Automation.Subsystem.Prediction.SuggestionPackage _package;
@@ -241,7 +243,11 @@ const PREDICTOR: &str = r#"public sealed class KcPreviewPredictor : System.Manag
             {
                 continue;
             }
-            _entries[line.Substring(0, split)] = line.Substring(split + 1);
+            // The note is display-only and rides in ToolTip; it never reaches the
+            // command line. An empty note becomes null, not an empty string.
+            string note = line.Substring(split + 1);
+            _entries.Add(new System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion(
+                line.Substring(0, split), note.Length == 0 ? null : note));
         }
     }
 
@@ -265,14 +271,11 @@ const PREDICTOR: &str = r#"public sealed class KcPreviewPredictor : System.Manag
         string prefix = context.InputAst.Extent.Text;
         if (!string.IsNullOrEmpty(prefix))
         {
-            foreach (var pair in _entries)
+            foreach (var entry in _entries)
             {
-                if (pair.Key.StartsWith(prefix, System.StringComparison.OrdinalIgnoreCase))
+                if (entry.SuggestionText.StartsWith(prefix, System.StringComparison.OrdinalIgnoreCase))
                 {
-                    // The note is display-only and rides in ToolTip; it never reaches the
-                    // command line. An empty note becomes null, not an empty string.
-                    _list.Add(new System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion(
-                        pair.Key, string.IsNullOrEmpty(pair.Value) ? null : pair.Value));
+                    _list.Add(entry);
                     if (_list.Count >= 10)
                     {
                         break;
@@ -422,11 +425,22 @@ mod tests {
     #[test]
     fn the_predictor_filters_by_prefix_and_fills_the_tooltip() {
         assert!(PREDICTOR.contains("context.InputAst.Extent.Text"));
-        assert!(PREDICTOR
-            .contains("pair.Key.StartsWith(prefix, System.StringComparison.OrdinalIgnoreCase)"));
-        assert!(PREDICTOR.contains("string.IsNullOrEmpty(pair.Value) ? null : pair.Value"));
+        assert!(PREDICTOR.contains(
+            "entry.SuggestionText.StartsWith(prefix, System.StringComparison.OrdinalIgnoreCase)"
+        ));
+        assert!(PREDICTOR.contains("note.Length == 0 ? null : note"));
         assert!(PREDICTOR.contains("_package.SuggestionEntries"));
         assert!(PREDICTOR.contains("_list.Clear()"));
+    }
+
+    #[test]
+    fn the_predictor_keeps_the_cache_file_order() {
+        // 字典不保证迭代顺序，候选会变成随机 10 条；文件已按最新在上排好，必须按顺序取。
+        assert!(
+            !PREDICTOR.contains("Dictionary<string, string> _entries"),
+            "候选不能用无序容器存"
+        );
+        assert!(PREDICTOR.contains("foreach (var entry in _entries)"));
     }
 
     #[test]
