@@ -4,6 +4,7 @@
 
 ## 功能
 
+- 输入命令前缀时，命令行下方列出匹配的 kc 历史与备注（PowerShell 集成）
 - 向上箭头打开 TUI
 - 顶部工具栏提供“备注”、“复制”和“删除”，也可点击操作
 - 底部搜索，实时过滤命令和备注
@@ -49,18 +50,28 @@ kc init --shell powershell | Out-String | Invoke-Expression
 
 这段输出必须放在 profile 的最后一行：它定义 `global:prompt`，之后定义的 prompt 会把它覆盖掉，命令就会悄悄不再进历史。
 
+### 命令预览
+
+脚本里注册了一个 PSReadLine 预测器：输入命令前缀时，命令行下方列出 kc 历史里匹配的命令，选中项的备注显示在列表下方。
+
+- 候选来自 `kc export` 写出的缓存文件，位置见「命令历史」一节的路径表。预测器读文件而不是调用 kc，按键路径上不会有进程启动开销
+- 预测器只在缓存文件变化时重读；`kc record` 每次记录后都会刷新它，也可以手动执行 `kc export`
+- 只有单行、不含 TAB 的命令会被导出：接受建议时插入的是缓存文件原文，多行命令没法原样插入，这类命令留给 TUI
+- 缓存文件变化或升级 kc 后，需要重新执行上面的 `kc init` 才会生效
+- `F2` 在 Inline 与 ListView 之间切换，预览默认用 ListView
+
 ## 命令历史
 
 kc 自己记录命令历史，不依赖 Atuin 等外部工具。
 
 记录由 PowerShell 的 `prompt` 钩子驱动：每次提示符出现前，kc 读取刚执行的那条命令，连同成功/失败一并写入数据库。失败的命令同样记录。
 
-历史数据库固定在用户目录，与同步目录无关，也不参与同步：
+历史数据库与预览缓存都固定在用户目录，与同步目录无关，也不参与同步：
 
-| 平台 | 路径 |
-| --- | --- |
-| Windows | `%USERPROFILE%\.kc\history.db` |
-| 其他 | `~/.kc/history.db` |
+| 平台 | 历史数据库 | 预览缓存 |
+| --- | --- | --- |
+| Windows | `%USERPROFILE%\.kc\history.db` | `%USERPROFILE%\.kc\preview.tsv` |
+| 其他 | `~/.kc/history.db` | `~/.kc/preview.tsv` |
 
 数据库是 SQLite，`command` 是主键，同名命令只保留一条，重复执行刷新时间戳。删除是物理删除，文件里不留痕迹。
 
