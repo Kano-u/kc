@@ -177,6 +177,8 @@ fn polyfill(upstream: &Path) -> Result<(), String> {
 
 /// 模块目录布局照抄官方 `LayoutModule`：少一个文件都会在导入时炸。
 fn install(upstream: &Path, dest: &Path) -> Result<(), String> {
+    // 删之前先探一遍：删到一半才撞上文件锁，会留下一个半残的模块目录。
+    ensure_replaceable(dest)?;
     remove(dest)?;
     let net6plus = dest.join("net6plus");
     let netstd = dest.join("netstd");
@@ -201,6 +203,59 @@ fn install(upstream: &Path, dest: &Path) -> Result<(), String> {
             .map_err(|error| format!("复制 {} 到 {} 失败: {error}", from.display(), to.display()))?;
     }
     Ok(())
+}
+
+/// Windows 上已被 pwsh 加载的 DLL 既不能覆盖也不能删除。装之前先探一遍，
+/// 有任一文件被占用就整体拒绝 —— 否则 `remove` 会删掉一部分文件后中止，
+/// 留下缺 `Pager.dll` 之类的半残模块目录。
+fn ensure_replaceable(dest: &Path) -> Result<(), String> {
+    if !dest.exists() {
+        return Ok(());
+    }
+    let mut locked = Vec::new();
+    collect_locked(dest, &mut locked)?;
+    if locked.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{} 下的 {} 个文件正被其他进程占用。先关闭所有 PowerShell 窗口（含运行中的 pwsh 会话）再重试：\n{}",
+        dest.display(),
+        locked.len(),
+        locked
+            .iter()
+            .map(|path| format!("  {}", path.display()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    ))
+}
+
+fn collect_locked(dir: &Path, locked: &mut Vec<PathBuf>) -> Result<(), String> {
+    let entries =
+        std::fs::read_dir(dir).map_err(|error| write_error(dir, &error))?;
+    for entry in entries {
+        let path = entry
+            .map_err(|error| write_error(dir, &error))?
+            .path();
+        if path.is_dir() {
+            collect_locked(&path, locked)?;
+        } else if is_locked(&path) {
+            locked.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// 以写方式打开探测：被加载的程序集只会以共享读方式打开，写打开必然失败。
+/// 不删文件、不写内容，探测本身无副作用。
+fn is_locked(path: &Path) -> bool {
+    match std::fs::OpenOptions::new().write(true).open(path) {
+        Ok(file) => {
+            drop(file);
+            false
+        }
+        // 权限问题也算“不能替换”：反正接下来也删不掉。
+        Err(_) => true,
+    }
 }
 
 /// Windows 上已被 pwsh 加载的 DLL 会被锁住，覆盖必然失败；这种情况要给出可操作的提示。
@@ -279,6 +334,22 @@ mod tests {
         // 每个补丁各自独立、互不重叠，必须全部应用；漏掉一个就会静默丢功能。
         assert!(PATCH_FILES.contains(&"patches/note-column.patch"));
         assert!(PATCH_FILES.contains(&"patches/prediction-selection.patch"));
+    }
+
+    #[test]
+    fn detects_no_lock_on_a_writable_directory() {
+        // 探测本身不能留下副作用，也不能误报普通文件。
+        let dir = std::env::temp_dir().join(format!("kc-patch-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("net6plus")).unwrap();
+        std::fs::write(dir.join("a.dll"), b"a").unwrap();
+        std::fs::write(dir.join("net6plus/b.dll"), b"b").unwrap();
+
+        assert!(!is_locked(&dir.join("a.dll")));
+        assert!(ensure_replaceable(&dir).is_ok());
+        assert!(ensure_replaceable(&dir.join("missing")).is_ok());
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
