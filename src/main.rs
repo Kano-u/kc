@@ -10,20 +10,20 @@ mod tui;
 
 use std::process::ExitCode;
 
-const USAGE: &str = "kc - Shell history notes and search
+const USAGE: &str = "kc - Shell 历史记录笔记与搜索
 
-Usage:
-  kc                      Start the TUI
-  kc pick --query QUERY   Start TUI for shell integration; emit one JSON result
+用法:
+  kc                      启动 TUI
+  kc pick --query QUERY   为 shell 集成启动 TUI；输出一条 JSON 结果
   kc record --command-env NAME
-                          Record the command in the NAME environment variable
-  kc import powershell    Import the PowerShell history into the database
-  kc init powershell      Print the PowerShell integration
-  kc --help               Show this help
+                          将命令记录到 NAME 环境变量中
+  kc import powershell    将 PowerShell 历史记录导入数据库
+  kc init powershell      打印 PowerShell 集成脚本
+  kc --help               显示此帮助
 
-Environment:
-  KC_CONFIG_DIR           Override the kc config/data directory
-  KC_RECORD               Set to 1 when the command succeeded, otherwise 0
+环境变量:
+  KC_CONFIG_DIR           覆盖 kc 的配置/数据目录
+  KC_RECORD               命令成功时设为 1，否则为 0
 ";
 
 fn main() -> ExitCode {
