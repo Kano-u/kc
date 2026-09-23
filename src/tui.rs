@@ -153,12 +153,13 @@ impl<'a> App<'a> {
     fn rebuild_filtered(&mut self) {
         let (notes_only, raw_query) = split_query(&self.query);
         let query = raw_query.to_lowercase();
+        // history 由最旧到最新排列，列表同样按这个顺序铺开：
+        // 最旧的在上面，最新的贴着输入行。
         self.filtered = self
             .history
             .iter()
             .filter(|command| matches_query(command, self.notes.get(command), &query, notes_only))
             .cloned()
-            .rev()
             .collect();
     }
 
@@ -1111,7 +1112,7 @@ mod tests {
         notes.set("git status", "check repo").unwrap();
 
         let app = App::new(&history, &mut notes, " ");
-        assert_eq!(app.filtered, vec!["git status", "scoop install"]);
+        assert_eq!(app.filtered, vec!["scoop install", "git status"]);
         remove_test_notes(&notes);
     }
 
@@ -1194,13 +1195,14 @@ mod tests {
     }
 
     fn screen(width: u16, height: u16, query: &str) -> Vec<String> {
+        // history 由最旧到最新排列。
         let history: Vec<String> = vec![
-            "atuin".to_owned(),
-            "scoop update".to_owned(),
-            "dir".to_owned(),
-            "atuin search --format json --limit 5".to_owned(),
-            "uv run h.py".to_owned(),
             "atuin search --delete-it-all".to_owned(),
+            "uv run h.py".to_owned(),
+            "atuin search --format json --limit 5".to_owned(),
+            "dir".to_owned(),
+            "scoop update".to_owned(),
+            "atuin".to_owned(),
         ];
         let mut notes = NoteStore::default();
         let mut app = App::new(&history, &mut notes, query);
@@ -1230,8 +1232,7 @@ mod tests {
     #[test]
     fn shows_history_bottom_up_with_newest_next_to_the_prompt() {
         let lines = screen(50, 8, "");
-        // 测试数据按 Atuin 默认顺序排列：第一条最新。
-        // 旧命令在上，最新命令紧贴输入行。
+        // 最旧命令在上，最新命令紧贴输入行。
         assert_eq!(
             lines[0],
             "\u{f044} 备注  \u{f0c5} 复制  \u{f014} 删除".to_owned()
@@ -1289,7 +1290,7 @@ mod tests {
 
     #[test]
     fn selects_the_newest_command_by_default() {
-        let history = vec!["newest".to_owned(), "older".to_owned()];
+        let history = vec!["older".to_owned(), "newest".to_owned()];
         let mut notes = NoteStore::default();
         let app = App::new(&history, &mut notes, "");
         assert_eq!(app.filtered, vec!["older", "newest"]);
@@ -1303,11 +1304,11 @@ mod tests {
         let mut app = App::new(&history, &mut notes, "git s");
         app.remove_query_char();
         assert_eq!(app.query, "git ");
-        assert_eq!(app.filtered, vec!["git switch", "git status"]);
+        assert_eq!(app.filtered, vec!["git status", "git switch"]);
 
         app.remove_query_char();
         assert_eq!(app.query, "git");
-        assert_eq!(app.filtered, vec!["git switch", "git status"]);
+        assert_eq!(app.filtered, vec!["git status", "git switch"]);
     }
 
     #[test]
@@ -1322,7 +1323,7 @@ mod tests {
 
     #[test]
     fn down_from_the_newest_command_requests_exit() {
-        let history = vec!["newest".to_owned(), "older".to_owned()];
+        let history = vec!["older".to_owned(), "newest".to_owned()];
         let mut notes = NoteStore::default();
         let mut app = App::new(&history, &mut notes, "");
         assert_eq!(app.selected_command(), Some("newest"));
@@ -1332,7 +1333,7 @@ mod tests {
 
     #[test]
     fn down_from_an_older_command_moves_toward_the_newest() {
-        let history = vec!["newest".to_owned(), "older".to_owned()];
+        let history = vec!["older".to_owned(), "newest".to_owned()];
         let mut notes = NoteStore::default();
         let mut app = App::new(&history, &mut notes, "");
         app.move_selection(-1);
@@ -1343,9 +1344,9 @@ mod tests {
     #[test]
     fn deleting_middle_entry_keeps_selection_on_the_same_row() {
         let history = vec![
-            "newest".to_owned(),
-            "middle".to_owned(),
             "oldest".to_owned(),
+            "middle".to_owned(),
+            "newest".to_owned(),
         ];
         let mut notes = NoteStore::default();
         let mut app = App::new(&history, &mut notes, "");
@@ -1362,9 +1363,9 @@ mod tests {
     #[test]
     fn deleting_newest_entry_selects_the_next_newest() {
         let history = vec![
-            "newest".to_owned(),
-            "middle".to_owned(),
             "oldest".to_owned(),
+            "middle".to_owned(),
+            "newest".to_owned(),
         ];
         let mut notes = NoteStore::default();
         let mut app = App::new(&history, &mut notes, "");
@@ -1377,9 +1378,9 @@ mod tests {
     #[test]
     fn deleting_oldest_entry_keeps_selection_on_the_next_row() {
         let history = vec![
-            "newest".to_owned(),
-            "middle".to_owned(),
             "oldest".to_owned(),
+            "middle".to_owned(),
+            "newest".to_owned(),
         ];
         let mut notes = NoteStore::default();
         let mut app = App::new(&history, &mut notes, "");
@@ -1392,9 +1393,9 @@ mod tests {
     #[test]
     fn failed_delete_keeps_the_list_and_selects_nothing() {
         let history = vec![
-            "newest".to_owned(),
-            "middle".to_owned(),
             "oldest".to_owned(),
+            "middle".to_owned(),
+            "newest".to_owned(),
         ];
         let mut notes = NoteStore::default();
         let mut app = App::new(&history, &mut notes, "");
