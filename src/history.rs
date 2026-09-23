@@ -1,308 +1,191 @@
 use regex::Regex;
-use std::collections::HashSet;
-use std::process::{Command, Stdio};
+use rusqlite::{Connection, OpenFlags};
+use std::path::Path;
 
-/// Atuin's `history list` defaults to oldest first. Ask for newest first so
-/// truncation and de-duplication keep the most recent occurrence of a command.
-fn history_args() -> [&'static str; 6] {
-    [
-        "history",
-        "list",
-        "--cmd-only",
-        "--print0",
-        "--reverse",
-        "false",
-    ]
-}
+const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS history (
+    command TEXT PRIMARY KEY,
+    at      INTEGER NOT NULL,
+    ok      INTEGER NOT NULL
+);
+";
 
-/// Atuin prints one NUL-terminated command per entry with `--print0`.
-///
-/// Duplicate commands are kept at their first position. Since `load_history`
-/// requests newest-first output, that position is the most recent occurrence.
-pub fn parse_history(raw: &[u8]) -> Vec<String> {
-    let mut seen = HashSet::new();
-    raw.split(|byte| *byte == 0)
-        .filter_map(|item| std::str::from_utf8(item).ok())
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-        .filter(|item| seen.insert((*item).to_owned()))
-        .map(str::to_owned)
-        .collect()
-}
-
-pub fn load_history(limit: u32, filters: &[Regex]) -> Result<Vec<String>, String> {
-    let output = Command::new("atuin")
-        .args(history_args())
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|error| format!("无法启动 Atuin: {error}"))?;
-
-    if !output.status.success() {
-        let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(if message.is_empty() {
-            "Atuin 返回错误。".to_owned()
-        } else {
-            format!("Atuin 返回错误: {message}")
-        });
+fn open(path: &Path) -> Result<Connection, String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("创建历史目录失败: {error}"))?;
     }
+    let connection =
+        Connection::open(path).map_err(|error| format!("打开历史数据库失败: {error}"))?;
+    connection
+        .execute_batch(SCHEMA)
+        .map_err(|error| format!("初始化历史数据库失败: {error}"))?;
+    Ok(connection)
+}
 
-    let mut history = parse_history(&output.stdout);
-    filter_history(&mut history, filters);
-    history.truncate(limit as usize);
-    Ok(history)
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_secs() as i64)
+        .unwrap_or_default()
+}
+
+/// 失败的命令同样记录，`ok` 只存着，界面不区分。
+pub fn upsert(path: &Path, command: &str, ok: bool) -> Result<(), String> {
+    let connection = open(path)?;
+    connection
+        .execute(
+            "INSERT INTO history (command, at, ok) VALUES (?1, ?2, ?3)
+             ON CONFLICT(command) DO UPDATE SET at = excluded.at, ok = excluded.ok",
+            rusqlite::params![command, now(), i64::from(ok)],
+        )
+        .map_err(|error| format!("写入历史失败: {error}"))?;
+    Ok(())
 }
 
 fn filter_history(history: &mut Vec<String>, filters: &[Regex]) {
     history.retain(|command| !filters.iter().any(|regex| regex.is_match(command)));
 }
 
-fn escape_regex(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for character in text.chars() {
-        match character {
-            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$' => {
-                escaped.push('\\');
-                escaped.push(character);
-            }
-            // Avoid terminating Atuin's r/.../ query at a slash in the command.
-            '/' => escaped.push_str("\\x2f"),
-            _ => escaped.push(character),
-        }
+/// 表按 `at` 升序返回，最旧在上；取最后 `limit` 条。
+pub fn load(path: &Path, limit: u32, filters: &[Regex]) -> Result<Vec<String>, String> {
+    if !path.exists() {
+        return Ok(Vec::new());
     }
-    escaped
-}
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| format!("打开历史数据库失败: {error}"))?;
+    let mut statement = connection
+        .prepare("SELECT command FROM history ORDER BY at")
+        .map_err(|error| format!("读取历史失败: {error}"))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| format!("读取历史失败: {error}"))?;
 
-fn delete_query(command: &str) -> String {
-    // `atuin history list --cmd-only` trims command strings before printing.
-    // Match the displayed command while tolerating stored leading/trailing whitespace.
-    format!("r/^\\s*{}\\s*$/", escape_regex(command))
-}
-
-fn search_args(command: &str) -> Vec<String> {
-    vec![
-        "search".to_owned(),
-        "--search-mode".to_owned(),
-        "fulltext".to_owned(),
-        "--cmd-only".to_owned(),
-        "--print0".to_owned(),
-        "--filter-mode".to_owned(),
-        "global".to_owned(),
-        "--".to_owned(),
-        delete_query(command),
-    ]
-}
-
-fn matching_commands(command: &str) -> Result<Vec<String>, String> {
-    let output = Command::new("atuin")
-        .args(search_args(command))
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|error| format!("无法启动 Atuin: {error}"))?;
-
-    if !output.status.success() {
-        // Atuin exits with 1 when nothing matches.
-        if output.stdout.is_empty() {
-            return Ok(Vec::new());
-        }
-        let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(if message.is_empty() {
-            "Atuin 搜索历史失败。".to_owned()
-        } else {
-            format!("Atuin 搜索历史失败: {message}")
-        });
+    let mut history = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| format!("读取历史失败: {error}"))?
+    {
+        history.push(
+            row.get::<_, String>(0)
+                .map_err(|error| format!("读取历史失败: {error}"))?,
+        );
     }
 
-    Ok(parse_history(&output.stdout))
+    filter_history(&mut history, filters);
+    let limit = limit as usize;
+    if history.len() > limit {
+        history.drain(..history.len() - limit);
+    }
+    Ok(history)
 }
 
-fn delete_args(command: &str) -> Vec<String> {
-    vec![
-        "search".to_owned(),
-        "--delete".to_owned(),
-        "--search-mode".to_owned(),
-        "fulltext".to_owned(),
-        "--filter-mode".to_owned(),
-        "global".to_owned(),
-        "--".to_owned(),
-        delete_query(command),
-    ]
-}
-
-pub fn delete_history(command: &str) -> Result<(), String> {
-    let matches = matching_commands(command)?;
-    if matches.is_empty() {
-        return Err(format!("Atuin 中未找到与“{command}”匹配的历史记录。"));
-    }
-
-    let output = Command::new("atuin")
-        .args(delete_args(command))
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|error| format!("无法启动 Atuin: {error}"))?;
-
-    if !output.status.success() {
-        let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(if message.is_empty() {
-            "Atuin 删除历史失败。".to_owned()
-        } else {
-            format!("Atuin 删除历史失败: {message}")
-        });
-    }
-
-    let remaining = matching_commands(command)?;
-    if remaining.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "Atuin 仍有 {} 条与“{command}”匹配的历史记录。",
-            remaining.len()
-        ))
-    }
+/// 物理删除，文件里不留痕迹。
+pub fn delete(path: &Path, command: &str) -> Result<(), String> {
+    let connection = open(path)?;
+    connection
+        .execute("DELETE FROM history WHERE command = ?1", [command])
+        .map_err(|error| format!("删除历史失败: {error}"))?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn requests_history_newest_first() {
-        assert_eq!(
-            history_args(),
-            [
-                "history",
-                "list",
-                "--cmd-only",
-                "--print0",
-                "--reverse",
-                "false"
-            ]
-        );
+    fn temp_db(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("kc-history-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir.join("history.db")
     }
 
-    #[test]
-    fn parses_and_deduplicates_history() {
-        let raw = b"cargo test\0git status\0cargo test\0npm run dev\0\0";
-        assert_eq!(
-            parse_history(raw),
-            vec!["cargo test", "git status", "npm run dev"]
-        );
-    }
-
-    #[test]
-    fn keeps_the_newest_duplicate_first() {
-        let raw = b"latest dir\0older dir\0latest dir\0old command\0";
-        assert_eq!(
-            parse_history(raw),
-            vec!["latest dir", "older dir", "old command"]
-        );
-    }
-
-    #[test]
-    fn trims_and_skips_empty_entries() {
-        assert!(parse_history(b"  \0\0").is_empty());
-    }
-
-    #[test]
-    fn filters_commands_matching_configured_regexes() {
-        let mut history = vec![
-            "git status".to_owned(),
-            "cargo test".to_owned(),
-            "cargo test --all".to_owned(),
-            "ls".to_owned(),
-        ];
-        let filters = vec![Regex::new("^cargo test$").unwrap()];
-        filter_history(&mut history, &filters);
-        assert_eq!(history, vec!["git status", "cargo test --all", "ls"]);
-    }
-
-    #[test]
-    fn unanchored_regex_filters_substrings() {
-        let mut history = vec!["git status".to_owned(), "echo secret".to_owned()];
-        let filters = vec![Regex::new("secret").unwrap()];
-        filter_history(&mut history, &filters);
-        assert_eq!(history, vec!["git status"]);
-    }
-
-    #[test]
-    fn empty_filter_list_keeps_everything() {
-        let mut history = vec!["dir".to_owned()];
-        filter_history(&mut history, &[]);
-        assert_eq!(history, vec!["dir"]);
-    }
-
-    #[test]
-    fn escapes_regex_metacharacters_for_exact_delete() {
-        assert_eq!(
-            delete_query("echo [$HOME] /tmp"),
-            "r/^\\s*echo \\[\\$HOME\\] \\x2ftmp\\s*$/".to_owned()
-        );
-        assert_eq!(delete_query("cd .."), "r/^\\s*cd \\.\\.\\s*$/".to_owned());
-    }
-
-    #[test]
-    fn delete_args_use_exact_regex_search() {
-        assert_eq!(
-            delete_args("dir"),
-            vec![
-                "search".to_owned(),
-                "--delete".to_owned(),
-                "--search-mode".to_owned(),
-                "fulltext".to_owned(),
-                "--filter-mode".to_owned(),
-                "global".to_owned(),
-                "--".to_owned(),
-                "r/^\\s*dir\\s*$/".to_owned(),
-            ]
-        );
-    }
-
-    #[test]
-    fn search_args_use_the_same_exact_regex_as_delete() {
-        assert_eq!(
-            search_args("cd .."),
-            vec![
-                "search".to_owned(),
-                "--search-mode".to_owned(),
-                "fulltext".to_owned(),
-                "--cmd-only".to_owned(),
-                "--print0".to_owned(),
-                "--filter-mode".to_owned(),
-                "global".to_owned(),
-                "--".to_owned(),
-                "r/^\\s*cd \\.\\.\\s*$/".to_owned(),
-            ]
-        );
-    }
-}
-
-#[cfg(all(test, unix))]
-mod unix_tests {
-    use super::*;
-    use std::os::unix::fs::PermissionsExt;
-
-    #[test]
-    fn invokes_atuin_and_reads_nul_output() {
-        let dir = std::env::temp_dir().join(format!("kc-fake-atuin-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let fake = dir.join("atuin");
-        fs::write(&fake, "#!/bin/sh\nprintf 'one\\0two\\0'").unwrap();
-        let mut permissions = fs::metadata(&fake).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&fake, permissions).unwrap();
-
-        let old_path = std::env::var_os("PATH");
-        let mut paths = vec![dir.clone()];
-        if let Some(old_path) = &old_path {
-            paths.extend(std::env::split_paths(old_path));
+    /// 直接写库以控制时间戳：`upsert` 用的是当前秒，同一秒内多条无法断言先后。
+    fn seed(path: &std::path::Path, rows: &[(&str, i64, i64)]) {
+        let connection = open(path).unwrap();
+        for (command, at, ok) in rows {
+            connection
+                .execute(
+                    "INSERT INTO history (command, at, ok) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![command, at, ok],
+                )
+                .unwrap();
         }
-        std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
-        let result = load_history(10, &[]).unwrap();
-        match old_path {
-            Some(value) => std::env::set_var("PATH", value),
-            None => std::env::remove_var("PATH"),
-        }
-        fs::remove_dir_all(&dir).unwrap();
-        assert_eq!(result, vec!["one", "two"]);
+    }
+
+    fn field(path: &std::path::Path, command: &str) -> (i64, i64) {
+        let connection = open(path).unwrap();
+        connection
+            .query_row(
+                "SELECT at, ok FROM history WHERE command = ?1",
+                [command],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn loads_oldest_first() {
+        let path = temp_db("order");
+        seed(
+            &path,
+            &[("cargo test", 30, 1), ("dir", 10, 1), ("cd ..", 20, 0)],
+        );
+        assert_eq!(load(&path, 10, &[]).unwrap(), vec!["dir", "cd ..", "cargo test"]);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn upsert_deduplicates_and_refreshes_the_row() {
+        let path = temp_db("upsert");
+        seed(&path, &[("dir", 1, 1)]);
+        upsert(&path, "dir", false).unwrap();
+        upsert(&path, "ls", true).unwrap();
+
+        let history = load(&path, 10, &[]).unwrap();
+        assert_eq!(history.len(), 2, "重复命令不应新增行: {history:?}");
+        let (at, ok) = field(&path, "dir");
+        assert!(at > 1, "upsert 应刷新时间戳: {at}");
+        assert_eq!(ok, 0, "upsert 应覆盖成功/失败标记");
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn keeps_the_newest_entries_within_the_limit() {
+        let path = temp_db("limit");
+        seed(&path, &[("one", 1, 1), ("two", 2, 1), ("three", 3, 1)]);
+        assert_eq!(load(&path, 2, &[]).unwrap(), vec!["two", "three"]);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn filters_matching_commands_out_of_the_list() {
+        let path = temp_db("filter");
+        seed(
+            &path,
+            &[("git status", 1, 1), ("echo secret", 2, 1), ("cargo test", 3, 1)],
+        );
+
+        let filters = vec![Regex::new("secret").unwrap(), Regex::new("^cargo").unwrap()];
+        assert_eq!(load(&path, 10, &filters).unwrap(), vec!["git status"]);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn delete_removes_the_row() {
+        let path = temp_db("delete");
+        seed(&path, &[("dir", 1, 1), ("ls", 2, 1)]);
+
+        delete(&path, "dir").unwrap();
+        assert_eq!(load(&path, 10, &[]).unwrap(), vec!["ls"]);
+        // 幂等：再删一次不报错。
+        delete(&path, "dir").unwrap();
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn missing_database_is_an_empty_history() {
+        let dir = std::env::temp_dir().join(format!("kc-history-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(load(&dir.join("history.db"), 10, &[]).unwrap().is_empty());
     }
 }

@@ -1,4 +1,4 @@
-use crate::history::load_history;
+use crate::history;
 use crate::notes::NoteStore;
 use crate::tui;
 use regex::Regex;
@@ -10,7 +10,7 @@ fn env_dir(name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn home_dir() -> PathBuf {
+pub(crate) fn home_dir() -> PathBuf {
     if let Some(home) = std::env::var_os("USERPROFILE") {
         return PathBuf::from(home);
     }
@@ -107,7 +107,11 @@ pub fn run(query: Option<&str>) -> std::process::ExitCode {
         }
     };
     let query = query.unwrap_or_default();
-    let history = match load_history(config.history_limit, &config.filters) {
+    let history = match history::load(
+        &crate::data_paths::history_db(),
+        config.history_limit,
+        &config.filters,
+    ) {
         Ok(history) => history,
         Err(error) => {
             eprintln!("{error}");

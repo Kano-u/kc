@@ -55,7 +55,7 @@ fn matches_query(command: &str, note: Option<&str>, query: &str, notes_only: boo
 
 fn spawn_delete(job: DeleteJob, sender: Sender<DeleteOutcome>) {
     thread::spawn(move || {
-        let result = crate::history::delete_history(&job.command);
+        let result = crate::history::delete(&crate::data_paths::history_db(), &job.command);
         let _ = sender.send(DeleteOutcome { job, result });
     });
 }

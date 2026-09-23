@@ -1,5 +1,10 @@
 use std::path::{Path, PathBuf};
 
+/// 历史数据库固定在用户目录，与同步目录无关，也不参与同步。
+pub fn history_db() -> PathBuf {
+    crate::app::home_dir().join(".kc").join("history.db")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataPaths {
     pub config: PathBuf,
@@ -101,6 +106,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn history_database_lives_outside_the_sync_directory() {
+        let path = history_db();
+        assert!(path.ends_with(Path::new(".kc").join("history.db")));
+        std::env::set_var("KC_CONFIG_DIR", temp_dir("history-isolated"));
+        assert_eq!(history_db(), path);
+        std::env::remove_var("KC_CONFIG_DIR");
     }
 
     #[test]
