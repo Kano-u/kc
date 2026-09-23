@@ -17,7 +17,6 @@ Usage:
   kc record --command-env NAME
                           Record the command in the NAME environment variable
   kc init powershell      Print the PowerShell integration
-  kc init bash            Print the Bash/Termux integration
   kc --help               Show this help
 
 Environment:
