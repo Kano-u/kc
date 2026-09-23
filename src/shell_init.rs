@@ -189,7 +189,10 @@ class KcPreviewCache : System.Management.Automation.Subsystem.Prediction.IComman
         if (-not [string]::IsNullOrEmpty($prefix)) {
             foreach ($pair in $this.Entries.GetEnumerator()) {
                 if ($pair.Key.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-                    $target.Add([System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion]::new($pair.Key))
+                    # The note is display-only and rides in ToolTip; it never reaches the command line.
+                    # An empty note becomes $null, not an empty string.
+                    $note = if ([string]::IsNullOrEmpty($pair.Value)) { $null } else { $pair.Value }
+                    $target.Add([System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion]::new($pair.Key, $note))
                     if ($target.Count -ge 10) {
                         break
                     }
@@ -297,6 +300,16 @@ mod tests {
     fn the_predictor_caches_the_file_by_modification_time() {
         assert!(POWERSHELL.contains("(Get-Item -LiteralPath $this.Path).LastWriteTimeUtc"));
         assert!(POWERSHELL.contains("if ($current -eq $this.Stamp)"));
+    }
+
+    #[test]
+    fn the_predictor_carries_the_note_in_the_tooltip() {
+        assert!(POWERSHELL.contains(
+            "$note = if ([string]::IsNullOrEmpty($pair.Value)) { $null } else { $pair.Value }"
+        ));
+        assert!(POWERSHELL.contains(
+            "[System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion]::new($pair.Key, $note)"
+        ));
     }
 
     #[test]
