@@ -30,7 +30,11 @@ fn now() -> i64 {
 }
 
 /// 失败的命令同样记录，`ok` 只存着，界面不区分。
-pub fn upsert(path: &Path, command: &str, ok: bool) -> Result<(), String> {
+/// filter 命中就不写入：这是 filter 的唯一拦截点，调用方不必自己判断。
+pub fn upsert(path: &Path, command: &str, ok: bool, config: &Config) -> Result<(), String> {
+    if config.filtered(command) {
+        return Ok(());
+    }
     let connection = open(path)?;
     connection
         .execute(
@@ -42,47 +46,78 @@ pub fn upsert(path: &Path, command: &str, ok: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// 表按 `at` 升序返回，最旧在上；filter 命中的不返回，再取最后 `history_limit` 条。
-pub fn load(path: &Path, config: &Config) -> Result<Vec<String>, String> {
+/// 表按 `at` 升序返回，最旧在上；取最后 `limit` 条。
+/// filter 不在这里执行：写入期已是唯一权威点，库内不会留下命中命令。
+pub fn load(path: &Path, limit: u32) -> Result<Vec<String>, String> {
     if !path.exists() {
         return Ok(Vec::new());
     }
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|error| format!("打开历史数据库失败: {error}"))?;
     let mut statement = connection
-        .prepare("SELECT command FROM history ORDER BY at")
+        .prepare("SELECT command FROM history ORDER BY at DESC LIMIT ?1")
         .map_err(|error| format!("读取历史失败: {error}"))?;
-    let mut rows = statement
-        .query([])
+    let rows = statement
+        .query_map([i64::from(limit)], |row| row.get::<_, String>(0))
         .map_err(|error| format!("读取历史失败: {error}"))?;
 
-    let mut history = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|error| format!("读取历史失败: {error}"))?
-    {
-        history.push(
-            row.get::<_, String>(0)
-                .map_err(|error| format!("读取历史失败: {error}"))?,
-        );
-    }
-
-    history.retain(|command| !config.filtered(command));
-    let limit = config.history_limit as usize;
-    if history.len() > limit {
-        history.drain(..history.len() - limit);
-    }
+    // SQL 按最新在前取，再反过来还原成最旧在上。
+    let mut history = rows
+        .collect::<Result<Vec<String>, _>>()
+        .map_err(|error| format!("读取历史失败: {error}"))?;
+    history.reverse();
     Ok(history)
 }
 
+/// filter 的唯一权威点是写入期；filter 生效之前就已入库的旧行在这里一次清掉，
+/// 保证任何时刻库里都不含命中命令。filter 为空时没有要清的东西。
+pub fn purge_filtered(path: &Path, config: &Config) -> Result<usize, String> {
+    if config.filters.is_empty() || !path.exists() {
+        return Ok(0);
+    }
+    let mut connection = open(path)?;
+    let doomed: Vec<String> = {
+        let mut statement = connection
+            .prepare("SELECT command FROM history")
+            .map_err(|error| format!("读取历史失败: {error}"))?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| format!("读取历史失败: {error}"))?;
+        rows.collect::<Result<Vec<String>, _>>()
+            .map_err(|error| format!("读取历史失败: {error}"))?
+            .into_iter()
+            .filter(|command| config.filtered(command))
+            .collect()
+    };
+
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("清理历史失败: {error}"))?;
+    for command in &doomed {
+        transaction
+            .execute("DELETE FROM history WHERE command = ?1", [command])
+            .map_err(|error| format!("清理历史失败: {error}"))?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("清理历史失败: {error}"))?;
+    Ok(doomed.len())
+}
+
 /// 批量导入外部历史：整体一个事务，`at` 从当前时间往前铺开、按顺序递增，
-/// 已有的同名命令被刷新成导入时的时间戳。返回写入的命令条数。
-pub fn import(path: &Path, commands: &[String]) -> Result<usize, String> {
+/// 已有的同名命令被刷新成导入时的时间戳。filter 命中就不写入。
+/// 返回实际写入的命令条数。
+pub fn import(path: &Path, commands: &[String], config: &Config) -> Result<usize, String> {
+    let commands: Vec<&String> = commands
+        .iter()
+        .filter(|command| !config.filtered(command))
+        .collect();
     let mut connection = open(path)?;
     let transaction = connection
         .transaction()
         .map_err(|error| format!("写入历史失败: {error}"))?;
-    let mut at = now() - commands.len() as i64;
+    let count = commands.len();
+    let mut at = now() - count as i64;
     for command in commands {
         at += 1;
         transaction
@@ -96,7 +131,7 @@ pub fn import(path: &Path, commands: &[String]) -> Result<usize, String> {
     transaction
         .commit()
         .map_err(|error| format!("写入历史失败: {error}"))?;
-    Ok(commands.len())
+    Ok(count)
 }
 
 /// 物理删除，文件里不留痕迹。
@@ -160,10 +195,7 @@ mod tests {
             &path,
             &[("cargo test", 30, 1), ("dir", 10, 1), ("cd ..", 20, 0)],
         );
-        assert_eq!(
-            load(&path, &config(10, &[])).unwrap(),
-            vec!["dir", "cd ..", "cargo test"]
-        );
+        assert_eq!(load(&path, 10).unwrap(), vec!["dir", "cd ..", "cargo test"]);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
@@ -171,10 +203,11 @@ mod tests {
     fn upsert_deduplicates_and_refreshes_the_row() {
         let path = temp_db("upsert");
         seed(&path, &[("dir", 1, 1)]);
-        upsert(&path, "dir", false).unwrap();
-        upsert(&path, "ls", true).unwrap();
+        let config = config(10, &[]);
+        upsert(&path, "dir", false, &config).unwrap();
+        upsert(&path, "ls", true, &config).unwrap();
 
-        let history = load(&path, &config(10, &[])).unwrap();
+        let history = load(&path, 10).unwrap();
         assert_eq!(history.len(), 2, "重复命令不应新增行: {history:?}");
         let (at, ok) = field(&path, "dir");
         assert!(at > 1, "upsert 应刷新时间戳: {at}");
@@ -183,16 +216,27 @@ mod tests {
     }
 
     #[test]
+    fn upsert_refuses_filtered_commands() {
+        let path = temp_db("upsert-filtered");
+        let config = config(10, &["secret"]);
+
+        upsert(&path, "echo secret", true, &config).unwrap();
+        assert!(load(&path, 10).unwrap().is_empty(), "命中 filter 不应入库");
+        // 未命中时库文件不会被创建，目录可能不存在。
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn keeps_the_newest_entries_within_the_limit() {
         let path = temp_db("limit");
         seed(&path, &[("one", 1, 1), ("two", 2, 1), ("three", 3, 1)]);
-        assert_eq!(load(&path, &config(2, &[])).unwrap(), vec!["two", "three"]);
+        assert_eq!(load(&path, 2).unwrap(), vec!["two", "three"]);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
-    fn filters_matching_commands_out_of_the_list() {
-        let path = temp_db("filter");
+    fn purge_removes_rows_matching_the_filter() {
+        let path = temp_db("purge");
         seed(
             &path,
             &[
@@ -202,12 +246,21 @@ mod tests {
             ],
         );
 
-        let filters = ["secret", "^cargo"];
-        assert_eq!(
-            load(&path, &config(10, &filters)).unwrap(),
-            vec!["git status"]
-        );
+        let removed = purge_filtered(&path, &config(10, &["secret", "^cargo"])).unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(load(&path, 10).unwrap(), vec!["git status"]);
+        // 再清一次已经无行可清。
+        assert_eq!(purge_filtered(&path, &config(10, &["secret"])).unwrap(), 0);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn purge_without_filters_or_database_is_a_no_op() {
+        let path = temp_db("purge-noop");
+        assert_eq!(purge_filtered(&path, &config(10, &[])).unwrap(), 0);
+        assert_eq!(purge_filtered(&path, &config(10, &["secret"])).unwrap(), 0);
+        // 自身不会创建库文件。
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
@@ -218,8 +271,9 @@ mod tests {
             .map(|command| (*command).to_owned())
             .collect();
 
-        assert_eq!(import(&path, &commands).unwrap(), 3);
-        let history = load(&path, &config(10, &[])).unwrap();
+        let config = config(10, &[]);
+        assert_eq!(import(&path, &commands, &config).unwrap(), 3);
+        let history = load(&path, 10).unwrap();
         assert_eq!(
             history,
             vec!["ls", "dir"],
@@ -232,15 +286,27 @@ mod tests {
     }
 
     #[test]
+    fn import_skips_filtered_commands_and_counts_what_it_wrote() {
+        let path = temp_db("import-filtered");
+        let commands: Vec<String> = ["dir", "echo secret", "ls"]
+            .iter()
+            .map(|command| (*command).to_owned())
+            .collect();
+
+        let config = config(10, &["secret"]);
+        assert_eq!(import(&path, &commands, &config).unwrap(), 2);
+        assert_eq!(load(&path, 10).unwrap(), vec!["dir", "ls"]);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
     fn import_puts_entries_at_the_end_of_the_history() {
         let path = temp_db("import-order");
         seed(&path, &[("old", 1, 1)]);
 
-        import(&path, &["first".to_owned(), "second".to_owned()]).unwrap();
-        assert_eq!(
-            load(&path, &config(10, &[])).unwrap(),
-            vec!["old", "first", "second"]
-        );
+        let config = config(10, &[]);
+        import(&path, &["first".to_owned(), "second".to_owned()], &config).unwrap();
+        assert_eq!(load(&path, 10).unwrap(), vec!["old", "first", "second"]);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
@@ -250,7 +316,7 @@ mod tests {
         seed(&path, &[("dir", 1, 1), ("ls", 2, 1)]);
 
         delete(&path, "dir").unwrap();
-        assert_eq!(load(&path, &config(10, &[])).unwrap(), vec!["ls"]);
+        assert_eq!(load(&path, 10).unwrap(), vec!["ls"]);
         // 幂等：再删一次不报错。
         delete(&path, "dir").unwrap();
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
@@ -260,8 +326,6 @@ mod tests {
     fn missing_database_is_an_empty_history() {
         let dir = std::env::temp_dir().join(format!("kc-history-missing-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(load(&dir.join("history.db"), &config(10, &[]))
-            .unwrap()
-            .is_empty());
+        assert!(load(&dir.join("history.db"), 10).unwrap().is_empty());
     }
 }

@@ -21,11 +21,7 @@ fn record(args: &[String]) -> Result<(), String> {
 
     // 配置坏掉时绝不"不过滤照记"：宁可这条不记，也不能把本该被 filter 挡住的命令写进库。
     let config = Config::load()?;
-    if config.filtered(&command) {
-        return Ok(());
-    }
-
-    history::upsert(&history_db()?, &command, succeeded())
+    history::upsert(&history_db()?, &command, succeeded(), &config)
 }
 
 /// 只认 `--command-env NAME` 这一种写法，多余或缺失的参数都是用法错误。

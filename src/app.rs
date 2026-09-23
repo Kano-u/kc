@@ -101,7 +101,10 @@ pub fn run(query: Option<&str>) -> std::process::ExitCode {
 /// 裸 `kc` 与 `kc pick` 唯一的数据加载入口，两者只在结果如何输出上不同。
 pub fn run_main(query: &str) -> Result<crate::tui::PickResult, String> {
     let config = Config::load()?;
-    let history = history::load(&crate::data_paths::history_db()?, &config)?;
+    let db = crate::data_paths::history_db()?;
+    // filter 的唯一权威点在写入期；这里清掉 filter 生效之前入库的旧行。
+    history::purge_filtered(&db, &config)?;
+    let history = history::load(&db, config.history_limit)?;
     let mut notes = NoteStore::load()?;
     tui::run(query, &history, &mut notes)
 }
