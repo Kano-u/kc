@@ -1,4 +1,4 @@
-use regex::Regex;
+use crate::app::Config;
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 
@@ -42,12 +42,8 @@ pub fn upsert(path: &Path, command: &str, ok: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn filter_history(history: &mut Vec<String>, filters: &[Regex]) {
-    history.retain(|command| !filters.iter().any(|regex| regex.is_match(command)));
-}
-
-/// 表按 `at` 升序返回，最旧在上；取最后 `limit` 条。
-pub fn load(path: &Path, limit: u32, filters: &[Regex]) -> Result<Vec<String>, String> {
+/// 表按 `at` 升序返回，最旧在上；filter 命中的不返回，再取最后 `history_limit` 条。
+pub fn load(path: &Path, config: &Config) -> Result<Vec<String>, String> {
     if !path.exists() {
         return Ok(Vec::new());
     }
@@ -71,8 +67,8 @@ pub fn load(path: &Path, limit: u32, filters: &[Regex]) -> Result<Vec<String>, S
         );
     }
 
-    filter_history(&mut history, filters);
-    let limit = limit as usize;
+    history.retain(|command| !config.filtered(command));
+    let limit = config.history_limit as usize;
     if history.len() > limit {
         history.drain(..history.len() - limit);
     }
@@ -115,6 +111,7 @@ pub fn delete(path: &Path, command: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use regex::Regex;
 
     fn temp_db(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("kc-history-{name}-{}", std::process::id()));
@@ -132,6 +129,16 @@ mod tests {
                     rusqlite::params![command, at, ok],
                 )
                 .unwrap();
+        }
+    }
+
+    fn config(limit: u32, filters: &[&str]) -> Config {
+        Config {
+            history_limit: limit,
+            filters: filters
+                .iter()
+                .map(|pattern| Regex::new(pattern).unwrap())
+                .collect(),
         }
     }
 
@@ -154,7 +161,7 @@ mod tests {
             &[("cargo test", 30, 1), ("dir", 10, 1), ("cd ..", 20, 0)],
         );
         assert_eq!(
-            load(&path, 10, &[]).unwrap(),
+            load(&path, &config(10, &[])).unwrap(),
             vec!["dir", "cd ..", "cargo test"]
         );
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
@@ -167,7 +174,7 @@ mod tests {
         upsert(&path, "dir", false).unwrap();
         upsert(&path, "ls", true).unwrap();
 
-        let history = load(&path, 10, &[]).unwrap();
+        let history = load(&path, &config(10, &[])).unwrap();
         assert_eq!(history.len(), 2, "重复命令不应新增行: {history:?}");
         let (at, ok) = field(&path, "dir");
         assert!(at > 1, "upsert 应刷新时间戳: {at}");
@@ -179,7 +186,10 @@ mod tests {
     fn keeps_the_newest_entries_within_the_limit() {
         let path = temp_db("limit");
         seed(&path, &[("one", 1, 1), ("two", 2, 1), ("three", 3, 1)]);
-        assert_eq!(load(&path, 2, &[]).unwrap(), vec!["two", "three"]);
+        assert_eq!(
+            load(&path, &config(2, &[])).unwrap(),
+            vec!["two", "three"]
+        );
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
@@ -195,8 +205,11 @@ mod tests {
             ],
         );
 
-        let filters = vec![Regex::new("secret").unwrap(), Regex::new("^cargo").unwrap()];
-        assert_eq!(load(&path, 10, &filters).unwrap(), vec!["git status"]);
+        let filters = ["secret", "^cargo"];
+        assert_eq!(
+            load(&path, &config(10, &filters)).unwrap(),
+            vec!["git status"]
+        );
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
@@ -209,7 +222,7 @@ mod tests {
             .collect();
 
         assert_eq!(import(&path, &commands).unwrap(), 3);
-        let history = load(&path, 10, &[]).unwrap();
+        let history = load(&path, &config(10, &[])).unwrap();
         assert_eq!(
             history,
             vec!["ls", "dir"],
@@ -228,7 +241,7 @@ mod tests {
 
         import(&path, &["first".to_owned(), "second".to_owned()]).unwrap();
         assert_eq!(
-            load(&path, 10, &[]).unwrap(),
+            load(&path, &config(10, &[])).unwrap(),
             vec!["old", "first", "second"]
         );
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
@@ -240,7 +253,7 @@ mod tests {
         seed(&path, &[("dir", 1, 1), ("ls", 2, 1)]);
 
         delete(&path, "dir").unwrap();
-        assert_eq!(load(&path, 10, &[]).unwrap(), vec!["ls"]);
+        assert_eq!(load(&path, &config(10, &[])).unwrap(), vec!["ls"]);
         // 幂等：再删一次不报错。
         delete(&path, "dir").unwrap();
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
@@ -250,6 +263,8 @@ mod tests {
     fn missing_database_is_an_empty_history() {
         let dir = std::env::temp_dir().join(format!("kc-history-missing-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(load(&dir.join("history.db"), 10, &[]).unwrap().is_empty());
+        assert!(load(&dir.join("history.db"), &config(10, &[]))
+            .unwrap()
+            .is_empty());
     }
 }

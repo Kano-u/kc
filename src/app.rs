@@ -112,11 +112,7 @@ pub fn run(query: Option<&str>) -> std::process::ExitCode {
         }
     };
     let query = query.unwrap_or_default();
-    let history = match history::load(
-        &crate::data_paths::history_db(),
-        config.history_limit,
-        &config.filters,
-    ) {
+    let history = match history::load(&crate::data_paths::history_db(), &config) {
         Ok(history) => history,
         Err(error) => {
             eprintln!("{error}");
