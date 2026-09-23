@@ -3,7 +3,7 @@ use crate::history;
 use crate::notes::NoteStore;
 use ratatui::layout::{Position, Rect};
 
-use super::copy_to_clipboard;
+use super::clipboard::copy_to_clipboard;
 
 fn split_query(query: &str) -> (bool, &str) {
     match query.strip_prefix(' ') {

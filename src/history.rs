@@ -186,10 +186,7 @@ mod tests {
     fn keeps_the_newest_entries_within_the_limit() {
         let path = temp_db("limit");
         seed(&path, &[("one", 1, 1), ("two", 2, 1), ("three", 3, 1)]);
-        assert_eq!(
-            load(&path, &config(2, &[])).unwrap(),
-            vec!["two", "three"]
-        );
+        assert_eq!(load(&path, &config(2, &[])).unwrap(), vec!["two", "three"]);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
