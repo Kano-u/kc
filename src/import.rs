@@ -31,11 +31,8 @@ fn run() -> Result<(PathBuf, usize), String> {
     let text = std::fs::read_to_string(&path)
         .map_err(|error| format!("读取历史文件 {} 失败: {error}", path.display()))?;
 
-    // 配置读不到时 filter 未知，只提醒、按不过滤处理，和 record 一致。
-    let config = Config::load().unwrap_or_else(|error| {
-        eprintln!("{error}");
-        Config::default()
-    });
+    // 配置读不到时 filter 未知，直接报错，不再按"不过滤"导入。
+    let config = Config::load()?;
 
     let commands = parse(&text, &config);
     let count = history::import(&history_db()?, &commands)?;

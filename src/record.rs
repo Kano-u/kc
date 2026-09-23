@@ -19,8 +19,8 @@ fn record(args: &[String]) -> Result<(), String> {
         return Ok(());
     };
 
-    // 配置读不到（目录不存在、缺 .host）时 filter 未知，照常记录、只是不过滤。
-    let config = Config::load().unwrap_or_default();
+    // 配置坏掉时绝不"不过滤照记"：宁可这条不记，也不能把本该被 filter 挡住的命令写进库。
+    let config = Config::load()?;
     if config.filtered(&command) {
         return Ok(());
     }
