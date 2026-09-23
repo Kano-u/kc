@@ -78,6 +78,11 @@ impl Config {
             filters: parse_filters(value.get("filter")),
         }
     }
+
+    /// filter 命中的命令不显示、不记录，也不导入。
+    pub fn filtered(&self, command: &str) -> bool {
+        self.filters.iter().any(|regex| regex.is_match(command))
+    }
 }
 
 fn parse_filters(value: Option<&toml::Value>) -> Vec<Regex> {
@@ -154,6 +159,19 @@ mod tests {
     fn missing_filter_list_is_empty() {
         let value: toml::Value = toml::from_str("history_limit = 10").unwrap();
         assert!(parse_filters(value.get("filter")).is_empty());
+    }
+
+    #[test]
+    fn filtered_matches_any_pattern() {
+        let value: toml::Value = toml::from_str(r#"filter = ["^dir$", "secret"]"#).unwrap();
+        let config = Config {
+            history_limit: 10,
+            filters: parse_filters(value.get("filter")),
+        };
+        assert!(config.filtered("dir"));
+        assert!(config.filtered("echo secret"));
+        assert!(!config.filtered("dirty"));
+        assert!(!Config::default().filtered("echo token=abc"));
     }
 
     #[test]

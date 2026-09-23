@@ -1,7 +1,6 @@
 use crate::app::Config;
 use crate::data_paths::history_db;
 use crate::history;
-use regex::Regex;
 use std::process::ExitCode;
 
 /// 由 PowerShell 的 prompt 钩子调用：把刚执行的命令写进历史库。
@@ -21,10 +20,8 @@ fn record(args: &[String]) -> Result<(), String> {
     };
 
     // 配置读不到（目录不存在、缺 .host）时 filter 未知，照常记录、只是不过滤。
-    let filters = Config::load()
-        .map(|config| config.filters)
-        .unwrap_or_default();
-    if should_skip(&command, &filters) {
+    let config = Config::load().unwrap_or_default();
+    if config.filtered(&command) {
         return Ok(());
     }
 
@@ -50,21 +47,9 @@ fn succeeded() -> bool {
     std::env::var("KC_RECORD").is_ok_and(|value| value == "1")
 }
 
-/// filter 同时决定「不显示」和「不记录」，命中的命令永不落库。
-fn should_skip(command: &str, filters: &[Regex]) -> bool {
-    filters.iter().any(|regex| regex.is_match(command))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn filters(patterns: &[&str]) -> Vec<Regex> {
-        patterns
-            .iter()
-            .map(|pattern| Regex::new(pattern).unwrap())
-            .collect()
-    }
 
     #[test]
     fn accepts_only_the_exact_flag_form() {
@@ -97,20 +82,6 @@ mod tests {
     fn blank_commands_are_not_recorded() {
         assert_eq!(clean(""), None);
         assert_eq!(clean("   \r\n\t "), None);
-    }
-
-    #[test]
-    fn filters_decide_whether_the_command_is_written() {
-        let filters = filters(&["^dir$", "secret"]);
-        assert!(should_skip("dir", &filters));
-        assert!(should_skip("echo secret", &filters));
-        assert!(!should_skip("dirty", &filters));
-        assert!(!should_skip("git status", &filters));
-    }
-
-    #[test]
-    fn an_empty_filter_list_keeps_everything() {
-        assert!(!should_skip("echo token=abc", &[]));
     }
 
     #[test]

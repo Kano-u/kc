@@ -64,6 +64,20 @@ kc 自己记录命令历史，不依赖 Atuin 等外部工具。
 
 数据库是 SQLite，`command` 是主键，同名命令只保留一条，重复执行刷新时间戳。删除是物理删除，文件里不留痕迹。
 
+### 导入 PowerShell 历史
+
+PSReadLine 自己的历史文件不会被 kc 读取，但可以一次性并入：
+
+```powershell
+kc import powershell
+```
+
+它读取 `%APPDATA%\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt`，按文件顺序写入历史库。该文件没有时间戳，kc 用当前时间往前铺开、依序递增，导入的命令排在现有历史之后。
+
+处理方式与 `record` 一致：命中 `filter` 的命令不导入，已经存在的同名命令按导入顺序刷新时间和成功标记。行尾反引号是 PSReadLine 的续行标记，会被还原成命令里的换行，所以多行命令导入后是一条完整的命令。
+
+重复导入是安全的：同名命令只是被刷新，不会产生重复行。
+
 ## 配置
 
 同步目录中必须恰好存在一个 `.host` 文件，例如 `com.host`。文件名决定：

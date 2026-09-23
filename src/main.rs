@@ -1,6 +1,7 @@
 mod app;
 mod data_paths;
 mod history;
+mod import;
 mod notes;
 mod pick;
 mod record;
@@ -16,6 +17,7 @@ Usage:
   kc pick --query QUERY   Start TUI for shell integration; emit one JSON result
   kc record --command-env NAME
                           Record the command in the NAME environment variable
+  kc import powershell    Import the PowerShell history into the database
   kc init powershell      Print the PowerShell integration
   kc --help               Show this help
 
@@ -33,6 +35,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("init") => shell_init::print(args.get(1).map(String::as_str)),
+        Some("import") => import::main(&args[1..]),
         Some("pick") => pick::main(&args[1..]),
         Some("record") => record::main(&args[1..]),
         Some(_) => {

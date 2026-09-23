@@ -79,6 +79,30 @@ pub fn load(path: &Path, limit: u32, filters: &[Regex]) -> Result<Vec<String>, S
     Ok(history)
 }
 
+/// 批量导入外部历史：整体一个事务，`at` 从当前时间往前铺开、按顺序递增，
+/// 已有的同名命令被刷新成导入时的时间戳。返回写入的命令条数。
+pub fn import(path: &Path, commands: &[String]) -> Result<usize, String> {
+    let mut connection = open(path)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("写入历史失败: {error}"))?;
+    let mut at = now() - commands.len() as i64;
+    for command in commands {
+        at += 1;
+        transaction
+            .execute(
+                "INSERT INTO history (command, at, ok) VALUES (?1, ?2, 1)
+                 ON CONFLICT(command) DO UPDATE SET at = excluded.at, ok = excluded.ok",
+                rusqlite::params![command, at],
+            )
+            .map_err(|error| format!("写入历史失败: {error}"))?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("写入历史失败: {error}"))?;
+    Ok(commands.len())
+}
+
 /// 物理删除，文件里不留痕迹。
 pub fn delete(path: &Path, command: &str) -> Result<(), String> {
     let connection = open(path)?;
@@ -173,6 +197,40 @@ mod tests {
 
         let filters = vec![Regex::new("secret").unwrap(), Regex::new("^cargo").unwrap()];
         assert_eq!(load(&path, 10, &filters).unwrap(), vec!["git status"]);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn import_keeps_the_given_order_and_deduplicates() {
+        let path = temp_db("import");
+        let commands: Vec<String> = ["dir", "ls", "dir"]
+            .iter()
+            .map(|command| (*command).to_owned())
+            .collect();
+
+        assert_eq!(import(&path, &commands).unwrap(), 3);
+        let history = load(&path, 10, &[]).unwrap();
+        assert_eq!(
+            history,
+            vec!["ls", "dir"],
+            "重复命令只留一行、时间取最后: {history:?}"
+        );
+        let (at, ok) = field(&path, "dir");
+        assert!(at > field(&path, "ls").0, "后出现的重复命令时间戳应更新");
+        assert_eq!(ok, 1);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn import_puts_entries_at_the_end_of_the_history() {
+        let path = temp_db("import-order");
+        seed(&path, &[("old", 1, 1)]);
+
+        import(&path, &["first".to_owned(), "second".to_owned()]).unwrap();
+        assert_eq!(
+            load(&path, 10, &[]).unwrap(),
+            vec!["old", "first", "second"]
+        );
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
