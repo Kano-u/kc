@@ -8,6 +8,8 @@ const ALLOWED: &[&str] = &["--shell"];
 
 /// 缓存文件的绝对路径在运行时替换进来：脚本本体是编译期常量，必须保持纯 ASCII。
 const PREVIEW_PATH: &str = "@KC_PREVIEW_PATH@";
+/// C# 源码以 base64 形式内嵌，同样是 ASCII。
+const PREDICTOR_URI: &str = "@KC_PREDICTOR_URI@";
 
 pub fn main(args: &[String]) -> ExitCode {
     let values = match args::parse(args, ALLOWED) {
@@ -36,13 +38,42 @@ pub fn main(args: &[String]) -> ExitCode {
 }
 
 fn rendered() -> Result<String, String> {
-    Ok(script(&preview_cache()?))
+    let uri = format!(
+        "data:text/plain;charset=utf-8;base64,{}",
+        base64(PREDICTOR.as_bytes())
+    );
+    Ok(script(&preview_cache()?, &uri))
 }
 
 /// 路径写进 PowerShell 单引号字符串：反斜杠不被解释，路径里的单引号写成两个。
-fn script(path: &Path) -> String {
+fn script(path: &Path, uri: &str) -> String {
     let literal = path.to_string_lossy().replace('\'', "''");
-    POWERSHELL.replace(PREVIEW_PATH, &literal)
+    let script = POWERSHELL.replace(PREVIEW_PATH, &literal);
+    script.replace(PREDICTOR_URI, uri)
+}
+
+/// 标准 base64（RFC 4648，带 `=` 填充）。预测器源码是内嵌常量，
+/// 这里避免为一次编码引入依赖。
+fn base64(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let (a, b, c) = (
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        );
+        let packed = (u32::from(a) << 16) | (u32::from(b) << 8) | u32::from(c);
+        for index in 0..4 {
+            if index <= chunk.len() {
+                let value = (packed >> (18 - 6 * index)) & 0b0011_1111;
+                output.push(char::from(ALPHABET[value as usize]));
+            } else {
+                output.push('=');
+            }
+        }
+    }
+    output
 }
 
 /// 这份脚本必须保持纯 ASCII：它经 `kc init --shell powershell | Invoke-Expression`
@@ -53,6 +84,44 @@ const POWERSHELL: &str = r#"# Keep this block as the last statement of the profi
 # and commands would silently stop reaching the history database.
 
 $global:KcPreviewPath = '@KC_PREVIEW_PATH@'
+
+# The predictor is compiled C#, not a PowerShell class, and the source travels as a
+# base64 data URI so this script stays pure ASCII. Two PSReadLine facts force this:
+# it runs the predictor on a thread-pool thread where no runspace exists, so a
+# PowerShell class cannot execute there at all; and it allows the predictor only
+# 20 ms, which interpreted script cannot meet. Compiling costs ~450 ms, so the
+# assembly is cached next to the cache file and keyed by the PowerShell version.
+$KcPredictorSource = [System.Text.Encoding]::UTF8.GetString(
+    [System.Convert]::FromBase64String(('@KC_PREDICTOR_URI@' -split ',', 2)[1]))
+$KcPreviewDll = Join-Path (Split-Path -Parent $global:KcPreviewPath) `
+    "KcPreviewPredictor-$($PSVersionTable.PSVersion).dll"
+
+if (-not (Test-Path -LiteralPath $KcPreviewDll)) {
+    # Add-Type refuses to overwrite an existing assembly, so build beside it and move.
+    $KcPreviewTemp = "$KcPreviewDll.tmp"
+    Remove-Item -LiteralPath $KcPreviewTemp -ErrorAction SilentlyContinue
+    Add-Type -TypeDefinition $KcPredictorSource -OutputAssembly $KcPreviewTemp -OutputType Library
+    Move-Item -LiteralPath $KcPreviewTemp -Destination $KcPreviewDll -Force
+}
+
+# Re-running kc init in the same session would otherwise fail: the type is loaded already.
+if (-not ("KcPreviewPredictor" -as [type])) {
+    Add-Type -Path $KcPreviewDll
+}
+
+$global:KcPreviewPredictor = [KcPreviewPredictor]::new($global:KcPreviewPath)
+[System.Management.Automation.Subsystem.SubsystemManager]::RegisterSubsystem(
+    [System.Management.Automation.Subsystem.SubsystemKind]::CommandPredictor,
+    $global:KcPreviewPredictor
+)
+
+# Plugin, not the combined history-and-plugin source: PSReadLine drops plugin suggestions
+# that are byte-identical to a history entry, which would hide kc's own candidates.
+Set-PSReadLineOption -PredictionSource Plugin
+Set-PSReadLineOption -PredictionViewStyle ListView
+
+Remove-Variable KcPredictorSource, KcPreviewDll, KcPreviewTemp -ErrorAction SilentlyContinue
+
 $global:KcLastId = -1
 
 function global:prompt {
@@ -124,126 +193,166 @@ Set-PSReadLineKeyHandler -Chord UpArrow -BriefDescription "Runs kc history picke
         [Microsoft.PowerShell.PSConsoleReadLine]::PreviousLine()
     }
 }
+"#;
 
-# The command predictor reads the cache file kc exports and runs on every keystroke,
-# so it must never fork kc. Every type below is spelled with its full name: this block
-# reaches the profile through Invoke-Expression, where namespace imports have no effect.
-class KcPreviewCache : System.Management.Automation.Subsystem.Prediction.ICommandPredictor {
-    [guid] $Id = [guid]::NewGuid()
-    [string] $Name = 'kc'
-    [string] $Description = 'kc history preview'
-    [System.Collections.Generic.Dictionary[string, string]] $FunctionsToDefine = $null
-    [string] $Path
-    [datetime] $Stamp = [datetime]::MinValue
-    [System.Collections.Generic.Dictionary[string, string]] $Entries = [System.Collections.Generic.Dictionary[string, string]]::new()
-    [System.Management.Automation.Subsystem.Prediction.SuggestionPackage] $Package
+/// 预测器源码。方法体里只能出现 .NET 调用：它跑在 PSReadLine 的线程池线程上，
+/// 那里没有 runspace，cmdlet 与类内方法调用都会失败（而且失败会被静默吞掉）。
+/// 类型全部写全限定名，因为这段代码经 `Add-Type` 编译时没有 `using` 命名空间。
+const PREDICTOR: &str = r#"public sealed class KcPreviewPredictor : System.Management.Automation.Subsystem.Prediction.ICommandPredictor
+{
+    private readonly string _path;
+    private readonly System.Collections.Generic.Dictionary<string, string> _entries =
+        new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.Ordinal);
+    private System.DateTime _stamp = System.DateTime.MinValue;
+    private readonly System.Collections.Generic.List<System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion> _list;
+    private readonly System.Management.Automation.Subsystem.Prediction.SuggestionPackage _package;
 
-    KcPreviewCache([string] $cachePath) {
-        $this.Path = $cachePath
-        $this.Reload()
-        # SuggestionPackage refuses an empty list, so the package is built once around a
-        # seed entry; every call reuses its own List and returns the same package.
-        $seed = [System.Collections.Generic.List[System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion]]::new()
-        $seed.Add([System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion]::new('seed'))
-        $this.Package = [System.Management.Automation.Subsystem.Prediction.SuggestionPackage]::new($seed)
-        $this.Package.SuggestionEntries.Clear()
+    public System.Guid Id { get; } = System.Guid.NewGuid();
+    public string Name => "kc";
+    public string Description => "kc history preview";
+    public System.Collections.Generic.Dictionary<string, string> FunctionsToDefine => null;
+
+    public KcPreviewPredictor(string path)
+    {
+        _path = path;
+        // SuggestionPackage refuses an empty list, so it is built once around a seed
+        // entry and every call reuses the list inside it, emptied first.
+        var seed = new System.Collections.Generic.List<System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion>();
+        seed.Add(new System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion("seed"));
+        _package = new System.Management.Automation.Subsystem.Prediction.SuggestionPackage(seed);
+        _list = _package.SuggestionEntries;
+        _list.Clear();
     }
 
-    # One stat per keystroke: the file is only re-read when kc rewrote it.
-    [void] Refresh() {
-        if (-not (Test-Path -LiteralPath $this.Path)) {
-            return
+    private void Reload()
+    {
+        _entries.Clear();
+        _stamp = System.DateTime.MinValue;
+        if (!System.IO.File.Exists(_path))
+        {
+            return;
         }
-        $current = (Get-Item -LiteralPath $this.Path).LastWriteTimeUtc
-        if ($current -eq $this.Stamp) {
-            return
-        }
-        $this.Reload()
-    }
-
-    [void] Reload() {
-        $this.Entries.Clear()
-        $this.Stamp = [datetime]::MinValue
-        if (-not (Test-Path -LiteralPath $this.Path)) {
-            return
-        }
-        $this.Stamp = (Get-Item -LiteralPath $this.Path).LastWriteTimeUtc
-        # The notes are UTF-8; the default encoding would mangle them.
-        foreach ($line in [System.IO.File]::ReadAllLines($this.Path, [System.Text.Encoding]::UTF8)) {
-            $split = $line.IndexOf([char] 9)
-            if ($split -le 0) {
-                continue
+        _stamp = System.IO.File.GetLastWriteTimeUtc(_path);
+        // The notes are UTF-8; the default encoding would mangle them.
+        foreach (var line in System.IO.File.ReadAllLines(_path, System.Text.Encoding.UTF8))
+        {
+            int split = line.IndexOf('\t');
+            if (split <= 0)
+            {
+                continue;
             }
-            $this.Entries[$line.Substring(0, $split)] = $line.Substring($split + 1)
+            _entries[line.Substring(0, split)] = line.Substring(split + 1);
         }
     }
 
-    [System.Management.Automation.Subsystem.Prediction.SuggestionPackage] GetSuggestion(
-        [System.Management.Automation.Subsystem.Prediction.PredictionClient] $client,
-        [System.Management.Automation.Subsystem.Prediction.PredictionContext] $context,
-        [System.Threading.CancellationToken] $cancellationToken) {
-        $target = $this.Package.SuggestionEntries
-        $target.Clear()
-        $this.Refresh()
-        $prefix = $context.InputAst.Extent.Text
-        if (-not [string]::IsNullOrEmpty($prefix)) {
-            foreach ($pair in $this.Entries.GetEnumerator()) {
-                if ($pair.Key.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-                    # The note is display-only and rides in ToolTip; it never reaches the command line.
-                    # An empty note becomes $null, not an empty string.
-                    $note = if ([string]::IsNullOrEmpty($pair.Value)) { $null } else { $pair.Value }
-                    $target.Add([System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion]::new($pair.Key, $note))
-                    if ($target.Count -ge 10) {
-                        break
+    public System.Management.Automation.Subsystem.Prediction.SuggestionPackage GetSuggestion(
+        System.Management.Automation.Subsystem.Prediction.PredictionClient client,
+        System.Management.Automation.Subsystem.Prediction.PredictionContext context,
+        System.Threading.CancellationToken cancellationToken)
+    {
+        _list.Clear();
+
+        // One stat per keystroke: the file is only re-read when kc rewrote it.
+        if (System.IO.File.Exists(_path))
+        {
+            System.DateTime current = System.IO.File.GetLastWriteTimeUtc(_path);
+            if (current != _stamp)
+            {
+                Reload();
+            }
+        }
+
+        string prefix = context.InputAst.Extent.Text;
+        if (!string.IsNullOrEmpty(prefix))
+        {
+            foreach (var pair in _entries)
+            {
+                if (pair.Key.StartsWith(prefix, System.StringComparison.OrdinalIgnoreCase))
+                {
+                    // The note is display-only and rides in ToolTip; it never reaches the
+                    // command line. An empty note becomes null, not an empty string.
+                    _list.Add(new System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion(
+                        pair.Key, string.IsNullOrEmpty(pair.Value) ? null : pair.Value));
+                    if (_list.Count >= 10)
+                    {
+                        break;
                     }
                 }
             }
         }
-        return $this.Package
+
+        return _package;
     }
 
-    [bool] CanAcceptFeedback(
-        [System.Management.Automation.Subsystem.Prediction.PredictionClient] $client,
-        [System.Management.Automation.Subsystem.Prediction.PredictorFeedbackKind] $feedbackKind) {
-        return $false
+    public bool CanAcceptFeedback(
+        System.Management.Automation.Subsystem.Prediction.PredictionClient client,
+        System.Management.Automation.Subsystem.Prediction.PredictorFeedbackKind kind)
+    {
+        return false;
     }
 
-    [void] OnSuggestionDisplayed(
-        [System.Management.Automation.Subsystem.Prediction.PredictionClient] $client,
-        [uint32] $session, [int] $count) {
+    public void OnSuggestionDisplayed(
+        System.Management.Automation.Subsystem.Prediction.PredictionClient client,
+        uint session, int count)
+    {
     }
 
-    [void] OnSuggestionAccepted(
-        [System.Management.Automation.Subsystem.Prediction.PredictionClient] $client,
-        [uint32] $session, [string] $acceptedSuggestion) {
+    public void OnSuggestionAccepted(
+        System.Management.Automation.Subsystem.Prediction.PredictionClient client,
+        uint session, string acceptedSuggestion)
+    {
     }
 
-    [void] OnCommandLineAccepted(
-        [System.Management.Automation.Subsystem.Prediction.PredictionClient] $client,
-        [System.Collections.Generic.IReadOnlyList[string]] $history) {
+    public void OnCommandLineAccepted(
+        System.Management.Automation.Subsystem.Prediction.PredictionClient client,
+        System.Collections.Generic.IReadOnlyList<string> history)
+    {
     }
 
-    [void] OnCommandLineExecuted(
-        [System.Management.Automation.Subsystem.Prediction.PredictionClient] $client,
-        [string] $commandLine, [bool] $success) {
+    public void OnCommandLineExecuted(
+        System.Management.Automation.Subsystem.Prediction.PredictionClient client,
+        string commandLine, bool success)
+    {
     }
 }
-
-$global:KcPreviewPredictor = [KcPreviewCache]::new($global:KcPreviewPath)
-[System.Management.Automation.Subsystem.SubsystemManager]::RegisterSubsystem(
-    [System.Management.Automation.Subsystem.SubsystemKind]::CommandPredictor,
-    $global:KcPreviewPredictor
-)
-
-# Plugin, not the combined history-and-plugin source: PSReadLine drops plugin suggestions
-# that are byte-identical to a history entry, which would hide kc's own candidates.
-Set-PSReadLineOption -PredictionSource Plugin
-Set-PSReadLineOption -PredictionViewStyle ListView
 "#;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 把脚本里内嵌的 C# 源码解出来，供测试直接检查。
+    fn embedded_predictor(script: &str) -> String {
+        let start = script.find("base64,").expect("找不到内嵌源码") + "base64,".len();
+        let encoded = script[start..]
+            .split('\'')
+            .next()
+            .expect("内嵌源码没有结束引号");
+        decode(encoded)
+    }
+
+    fn decode(input: &str) -> String {
+        let mut bytes = Vec::new();
+        let mut buffer = 0u32;
+        let mut bits = 0;
+        for byte in input.bytes().filter(|byte| *byte != b'=') {
+            let value = match byte {
+                b'A'..=b'Z' => byte - b'A',
+                b'a'..=b'z' => byte - b'a' + 26,
+                b'0'..=b'9' => byte - b'0' + 52,
+                b'+' => 62,
+                b'/' => 63,
+                other => panic!("非法 base64 字符: {}", other as char),
+            };
+            buffer = (buffer << 6) | u32::from(value);
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                bytes.push((buffer >> bits) as u8);
+            }
+        }
+        String::from_utf8(bytes).expect("内嵌源码不是 UTF-8")
+    }
 
     #[test]
     fn stays_ascii_so_any_console_codepage_can_decode_it() {
@@ -251,21 +360,108 @@ mod tests {
             POWERSHELL.is_ascii(),
             "脚本含非 ASCII 字节，管道解码会破坏它"
         );
+        assert!(PREDICTOR_URI.is_ascii());
+        let output = script(Path::new(r"C:\Users\k\.kc\preview.tsv"), "data:,");
+        assert!(output.is_ascii(), "生成脚本含非 ASCII 字节");
     }
 
     #[test]
     fn writes_the_preview_cache_path_as_a_single_quoted_literal() {
         let path = Path::new(r"C:\Users\k\.kc\preview.tsv");
-        let output = script(path);
+        let output = script(path, "data:,");
         assert!(output.contains(r"$global:KcPreviewPath = 'C:\Users\k\.kc\preview.tsv'"));
         assert!(!output.contains(PREVIEW_PATH), "占位符没有被替换");
-        assert!(output.is_ascii());
     }
 
     #[test]
     fn doubles_single_quotes_in_the_preview_path() {
-        let output = script(Path::new("/tmp/it's/preview.tsv"));
+        let output = script(Path::new("/tmp/it's/preview.tsv"), "data:,");
         assert!(output.contains("$global:KcPreviewPath = '/tmp/it''s/preview.tsv'"));
+    }
+
+    #[test]
+    fn carries_the_predictor_as_base64_rather_than_as_source() {
+        let uri = format!(
+            "data:text/plain;charset=utf-8;base64,{}",
+            base64(PREDICTOR.as_bytes())
+        );
+        let output = script(Path::new("p"), &uri);
+        assert!(!output.contains(PREDICTOR_URI), "占位符没有被替换");
+        assert!(
+            !output.contains("public sealed class"),
+            "源码应当以 base64 形式内嵌"
+        );
+        assert_eq!(embedded_predictor(&output), PREDICTOR);
+    }
+
+    #[test]
+    fn base64_matches_the_known_vectors() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foob"), "Zm9vYg==");
+        assert_eq!(base64(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn the_predictor_only_calls_dotnet_from_the_prediction_path() {
+        // 线程池线程上没有 runspace：cmdlet 与类内方法调用都会失败。
+        for forbidden in ["Test-Path", "Get-Item", "Get-Content", "Write-Output"] {
+            assert!(
+                !PREDICTOR.contains(forbidden),
+                "预测器不能用 cmdlet: {forbidden}"
+            );
+        }
+        assert!(PREDICTOR.contains("System.IO.File.ReadAllLines"));
+        assert!(PREDICTOR.contains("System.IO.File.GetLastWriteTimeUtc"));
+        assert!(PREDICTOR.contains("System.Text.Encoding.UTF8"));
+    }
+
+    #[test]
+    fn the_predictor_filters_by_prefix_and_fills_the_tooltip() {
+        assert!(PREDICTOR.contains("context.InputAst.Extent.Text"));
+        assert!(PREDICTOR
+            .contains("pair.Key.StartsWith(prefix, System.StringComparison.OrdinalIgnoreCase)"));
+        assert!(PREDICTOR.contains("string.IsNullOrEmpty(pair.Value) ? null : pair.Value"));
+        assert!(PREDICTOR.contains("_package.SuggestionEntries"));
+        assert!(PREDICTOR.contains("_list.Clear()"));
+    }
+
+    #[test]
+    fn the_predictor_seeds_the_package_because_empty_ones_are_rejected() {
+        assert!(PREDICTOR.contains(
+            r#"new System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion("seed")"#
+        ));
+    }
+
+    #[test]
+    fn compiles_the_predictor_once_and_caches_it_by_powershell_version() {
+        assert!(POWERSHELL.contains("KcPreviewPredictor-$($PSVersionTable.PSVersion).dll"));
+        assert!(POWERSHELL.contains("if (-not (Test-Path -LiteralPath $KcPreviewDll)) {"));
+        assert!(POWERSHELL.contains(
+            "Add-Type -TypeDefinition $KcPredictorSource -OutputAssembly $KcPreviewTemp"
+        ));
+        assert!(POWERSHELL.contains("Add-Type -Path $KcPreviewDll"));
+        assert!(POWERSHELL.contains(r#"if (-not ("KcPreviewPredictor" -as [type])) {"#));
+    }
+
+    #[test]
+    fn registers_the_predictor_with_its_full_type_names() {
+        assert!(POWERSHELL.contains("[KcPreviewPredictor]::new($global:KcPreviewPath)"));
+        assert!(POWERSHELL.contains(
+            "[System.Management.Automation.Subsystem.SubsystemManager]::RegisterSubsystem("
+        ));
+        assert!(POWERSHELL
+            .contains("[System.Management.Automation.Subsystem.SubsystemKind]::CommandPredictor"));
+    }
+
+    #[test]
+    fn previews_with_the_plugin_source_in_list_view() {
+        assert!(POWERSHELL.contains("Set-PSReadLineOption -PredictionSource Plugin"));
+        assert!(!POWERSHELL.contains("HistoryAndPlugin"));
+        assert!(POWERSHELL.contains("Set-PSReadLineOption -PredictionViewStyle ListView"));
     }
 
     #[test]
@@ -288,59 +484,6 @@ mod tests {
         assert!(POWERSHELL.contains("$entry.Id -ne $global:KcLastId"));
         assert!(POWERSHELL.contains("kc record --command-env KC_COMMAND"));
         assert!(POWERSHELL.contains(r#"$env:KC_RECORD = if ($ok) { "1" } else { "0" }"#));
-    }
-
-    #[test]
-    fn the_predictor_class_uses_fully_qualified_names() {
-        assert!(POWERSHELL.contains(
-            "class KcPreviewCache : System.Management.Automation.Subsystem.Prediction.ICommandPredictor"
-        ));
-        assert!(!POWERSHELL.contains("using namespace"));
-    }
-
-    #[test]
-    fn the_predictor_reads_the_cache_as_utf8_and_filters_by_prefix() {
-        assert!(POWERSHELL.contains("[System.Text.Encoding]::UTF8"));
-        assert!(POWERSHELL.contains(
-            "$pair.Key.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)"
-        ));
-        assert!(POWERSHELL.contains("$context.InputAst.Extent.Text"));
-    }
-
-    #[test]
-    fn the_predictor_caches_the_file_by_modification_time() {
-        assert!(POWERSHELL.contains("(Get-Item -LiteralPath $this.Path).LastWriteTimeUtc"));
-        assert!(POWERSHELL.contains("if ($current -eq $this.Stamp)"));
-    }
-
-    #[test]
-    fn the_predictor_carries_the_note_in_the_tooltip() {
-        assert!(POWERSHELL.contains(
-            "$note = if ([string]::IsNullOrEmpty($pair.Value)) { $null } else { $pair.Value }"
-        ));
-        assert!(POWERSHELL.contains(
-            "[System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion]::new($pair.Key, $note)"
-        ));
-    }
-
-    #[test]
-    fn registers_the_predictor_with_its_full_type_names() {
-        assert!(POWERSHELL.contains(
-            "[KcPreviewCache]::new($global:KcPreviewPath)"
-        ));
-        assert!(POWERSHELL.contains(
-            "[System.Management.Automation.Subsystem.SubsystemManager]::RegisterSubsystem("
-        ));
-        assert!(POWERSHELL.contains(
-            "[System.Management.Automation.Subsystem.SubsystemKind]::CommandPredictor"
-        ));
-    }
-
-    #[test]
-    fn previews_with_the_plugin_source_in_list_view() {
-        assert!(POWERSHELL.contains("Set-PSReadLineOption -PredictionSource Plugin"));
-        assert!(!POWERSHELL.contains("HistoryAndPlugin"));
-        assert!(POWERSHELL.contains("Set-PSReadLineOption -PredictionViewStyle ListView"));
     }
 
     #[test]

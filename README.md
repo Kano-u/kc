@@ -57,7 +57,9 @@ kc init --shell powershell | Out-String | Invoke-Expression
 - 候选来自 `kc export` 写出的缓存文件，位置见「命令历史」一节的路径表。预测器读文件而不是调用 kc，按键路径上不会有进程启动开销
 - 预测器只在缓存文件变化时重读；`kc record` 每次记录后都会刷新它，也可以手动执行 `kc export`
 - 只有单行、不含 TAB 的命令会被导出：接受建议时插入的是缓存文件原文，多行命令没法原样插入，这类命令留给 TUI
-- 缓存文件变化或升级 kc 后，需要重新执行上面的 `kc init` 才会生效
+- 预测器是编译成 DLL 的 C#，不是 PowerShell 脚本。这不是偏好：PSReadLine 把预测器放在没有 runspace 的线程池线程上跑，只给 20 ms 预算，解释执行的脚本两边都过不了
+- 首次执行 `kc init` 时会编译一次，约 450 ms；DLL 缓存在 `~/.kc/KcPreviewPredictor-<PowerShell 版本>.dll`，之后启动只读它。升级 kc 后要删掉这个 DLL 才会重新编译
+- 升级 kc 后需要重新执行上面的 `kc init` 才会生效
 - `F2` 在 Inline 与 ListView 之间切换，预览默认用 ListView
 
 ## 命令历史
