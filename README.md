@@ -52,7 +52,7 @@ kc init --shell powershell | Out-String | Invoke-Expression
 
 ### 命令预览
 
-脚本里注册了一个 PSReadLine 预测器：输入命令前缀时，命令行下方列出 kc 历史里匹配的命令，选中项的备注显示在列表下方。
+脚本里注册了一个 PSReadLine 预测器：输入命令前缀时，命令行下方列出 kc 历史里匹配的命令，每条候选后面跟着它的备注。
 
 - 候选来自 `kc export` 写出的缓存文件，位置见「命令历史」一节的路径表。预测器读文件而不是调用 kc，按键路径上不会有进程启动开销
 - 缓存文件里最新执行过的命令排在最前，所以输入前缀时拿到的是**最近用过的**匹配命令
@@ -62,6 +62,31 @@ kc init --shell powershell | Out-String | Invoke-Expression
 - 首次执行 `kc init` 时会编译一次，约 450 ms；DLL 缓存在 `~/.kc/KcPreviewPredictor-<PowerShell 版本>.dll`，之后启动只读它。升级 kc 后要删掉这个 DLL 才会重新编译
 - 升级 kc 后需要重新执行上面的 `kc init` 才会生效
 - `F2` 在 Inline 与 ListView 之间切换，预览默认用 ListView
+
+**备注要显示在每行候选后面，需要给 PSReadLine 打补丁**，见下一节。不打补丁时备注只出现在选中项的下方，需要先按 `↑`/`↓` 选中才看得到——这是 PSReadLine 的行为：命中备注的字段是 `ToolTip`，而它只在候选被选中时才渲染。
+
+### 每行显示备注（kc psreadline-patch）
+
+```powershell
+kc psreadline-patch
+```
+
+会在本机把 [Kano-u/PSReadLine-Patch](https://github.com/Kano-u/PSReadLine-Patch) 的补丁应用到当前 PSReadLine 上，让候选行尾部的 `[来源]` 位置显示备注：
+
+```
+PS D:\> npx
+   > npx create-react-app my-app                        创建 react 项目
+   > npx tsc --noEmit                                   只做类型检查
+   > npx @agegr/pi-web@latest                           pi web 网页端
+   ⋮
+   <kc(10)>
+```
+
+- 需要 `git` 和 `dotnet` SDK。命令会自动问 pwsh 要当前 PSReadLine 版本与用户模块目录，然后拉取对应上游标签、应用补丁、本机编译、装进用户模块目录，最后新开一个 pwsh 验证是否真的加载到了补丁版
+- 补丁只装进当前用户的模块目录，不动系统目录，也不需要管理员权限
+- **升级 PowerShell 后要重跑一次**：PSReadLine 随 PowerShell 一起升级，版本号变了就得对着新版本重新打一次
+- 装完要重启 PowerShell 窗口才生效
+- 注：这是个人自用的改动，不向上游提交。打补丁后每行不再标注来源，来源仍可从底部 `<kc(10)>` 和 `Ctrl+↑↓` 看到
 
 ## 命令历史
 

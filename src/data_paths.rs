@@ -11,6 +11,12 @@ pub fn preview_cache() -> Result<PathBuf, String> {
     Ok(home_dir()?.join(".kc").join("preview.tsv"))
 }
 
+/// `kc psreadline-patch` 的工作目录：上游源码、补丁仓库、编译产物都放这里。
+/// 每次运行都整个删掉重建，所以不保留任何需要留存的东西。
+pub fn psreadline_build_dir() -> Result<PathBuf, String> {
+    Ok(home_dir()?.join(".kc").join("psreadline"))
+}
+
 /// Windows 用 `USERPROFILE`，Termux 等用 `HOME`；两者都没有就报错，
 /// 绝不能退化到当前目录，否则历史与备注会写进任意工作目录。
 fn home_dir() -> Result<PathBuf, String> {
@@ -157,6 +163,13 @@ mod tests {
     fn preview_cache_lives_next_to_the_history_database() {
         let path = preview_cache().unwrap();
         assert!(path.ends_with(Path::new(".kc").join("preview.tsv")));
+        assert_eq!(path.parent(), history_db().unwrap().parent());
+    }
+
+    #[test]
+    fn psreadline_build_directory_lives_under_the_kc_home() {
+        let path = psreadline_build_dir().unwrap();
+        assert!(path.ends_with(Path::new(".kc").join("psreadline")));
         assert_eq!(path.parent(), history_db().unwrap().parent());
     }
 
