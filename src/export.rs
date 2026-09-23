@@ -15,7 +15,10 @@ pub fn main(args: &[String]) -> ExitCode {
         return ExitCode::from(2);
     }
     match refresh() {
-        Ok(_) => ExitCode::SUCCESS,
+        Ok((path, count)) => {
+            println!("已导出 {count} 条命令到 {}。", path.display());
+            ExitCode::SUCCESS
+        }
         Err(error) => {
             eprintln!("kc export: {error}");
             ExitCode::FAILURE
