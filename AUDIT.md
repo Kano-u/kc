@@ -131,11 +131,16 @@
   - `kc record` / `kc import` 不再 `unwrap_or_default()`，配置失败即中止
 - 验证：`kc` 在坏配置下退出码 1 且不打印界面；新增 6 个测试覆盖各错误分支。
 
-### 🔲 C3. `apply_delete` 的选中项修补算法
+### ✅ C3. `apply_delete` 的选中项修补算法
 
-- 位置：`src/tui/app.rs`：删除后按 `filtered_index > 0` 分支调整 `selected`，再 `scroll_offset.min(selected)`、`clamp_scroll()`。
+- 原位置：`src/tui/app.rs`：删除后按 `filtered_index > 0` 分支调整 `selected`，再 `scroll_offset.min(selected)`、`clamp_scroll()`。
 - 问题：列表顺序改成「最旧在上、最新在下」后叠加的补丁；历史上还有一次整块回滚（`e2c47e1 Revert "feat: keep selection inside the middle band while scrolling"`）。
-- 待定：应把「删除后选中哪一行」收敛成一个纯函数。**未改**。
+- 已做：抽出纯函数 `selection_after_removal(selected, remaining)`，规则一句话说清：
+  光标落到被删项的上一行（更旧的一条），到顶则停在新最旧一条。
+  删掉分支与 `scroll_offset.min(selected)`的手工修剪，滚动统一交给已有的 `clamp_scroll`。
+- 注意：原实现的 `if > 0 { n-1 } else { 0 }` 与 `saturating_sub(1)` 等价，行为未变。
+- 验证：新增 3 个测试；其中两个设了真实 `list_area`，
+  覆盖旧测试从未走到的滚动分支（旧的测试都因 `list_area` 为默认值而 `visible_height` 为 1）。
 
 ### 🔲 C4. PowerShell 去重的双重条件
 
@@ -187,7 +192,6 @@
 | 优先级 | 条目 | 需要先决定什么 |
 | --- | --- | --- |
 | 中 | C6 参数解析风格 | 是否统一 |
-| 低 | C3 删除后选中算法 | 收敛成纯函数 |
 | 低 | C4 PowerShell 去重条件 | 需实机验证 |
 | 低 | B1 的 `path: Option` | 改成非 `Option` |
 | 后续 | D1 Termux 集成 | `kc init bash` + `kc import` 支持 bash/zsh |

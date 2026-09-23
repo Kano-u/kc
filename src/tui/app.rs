@@ -12,6 +12,13 @@ fn split_query(query: &str) -> (bool, &str) {
     }
 }
 
+/// 删除后光标落到被删项的上一行（更旧的一条）。
+/// 列表底部对齐，所以列表没满时这看上去就是“留在原来的屏行”；
+/// 删掉最旧一条时无法再上移，停在新的最旧一条；列表清空则为 0。
+fn selection_after_removal(selected: usize, remaining: usize) -> usize {
+    selected.saturating_sub(1).min(remaining.saturating_sub(1))
+}
+
 fn matches_query(command: &str, note: Option<&str>, query: &str, notes_only: bool) -> bool {
     if notes_only && note.is_none_or(|note| note.is_empty()) {
         return false;
@@ -242,16 +249,9 @@ impl<'a> App<'a> {
             return;
         };
 
-        let filtered_index = self.selected;
-        let scroll_offset = self.scroll_offset;
         self.history.remove(history_index);
         self.rebuild_filtered();
-        self.selected = if filtered_index > 0 {
-            (filtered_index - 1).min(self.filtered.len().saturating_sub(1))
-        } else {
-            0
-        };
-        self.scroll_offset = scroll_offset.min(self.selected);
+        self.selected = selection_after_removal(self.selected, self.filtered.len());
         self.clamp_scroll();
 
         if let Err(error) = self.notes.remove(command) {
@@ -418,6 +418,49 @@ mod tests {
         assert_eq!(app.selected_command(), Some("older"));
         assert!(app.move_down());
         assert_eq!(app.selected_command(), Some("newest"));
+    }
+
+    #[test]
+    fn selection_after_removal_moves_up_one_row() {
+        // 常见情形：光标在第 2 行，删掉后第 1 行的旧命令补上。
+        assert_eq!(selection_after_removal(1, 2), 0);
+        assert_eq!(selection_after_removal(2, 2), 1);
+        // 删掉最旧一条：无法再上移，停在新的最旧一条。
+        assert_eq!(selection_after_removal(0, 2), 0);
+        // 删到空。
+        assert_eq!(selection_after_removal(0, 0), 0);
+    }
+
+    #[test]
+    fn deleting_inside_a_scrolled_list_keeps_the_view_stable() {
+        let history: Vec<String> = (0..10).map(|index| format!("cmd{index}")).collect();
+        let mut notes = NoteStore::default();
+        let mut app = App::new(&history, &mut notes, "");
+        // 列表底部对齐，视口高度 3，当前选中最新一条。
+        app.list_area = ratatui::layout::Rect::new(0, 0, 20, 3);
+        app.selected = 9;
+        app.clamp_scroll();
+        assert_eq!(app.scroll_offset, 7);
+
+        app.apply_delete("cmd9", Ok(()));
+        assert_eq!(app.filtered.len(), 9);
+        assert_eq!(app.selected_command(), Some("cmd8"));
+        // 视口跟着上移一行，旧命令补位，不出现跳空。
+        assert_eq!(app.scroll_offset, 7);
+    }
+
+    #[test]
+    fn deleting_the_oldest_entry_in_a_scrolled_list_clamps_to_the_top() {
+        let history: Vec<String> = (0..10).map(|index| format!("cmd{index}")).collect();
+        let mut notes = NoteStore::default();
+        let mut app = App::new(&history, &mut notes, "");
+        app.list_area = ratatui::layout::Rect::new(0, 0, 20, 3);
+        app.selected = 0;
+        app.scroll_offset = 0;
+
+        app.apply_delete("cmd0", Ok(()));
+        assert_eq!(app.selected_command(), Some("cmd1"));
+        assert_eq!(app.scroll_offset, 0);
     }
 
     #[test]
