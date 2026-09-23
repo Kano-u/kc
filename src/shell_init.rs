@@ -99,7 +99,10 @@ mod tests {
 
     #[test]
     fn stays_ascii_so_any_console_codepage_can_decode_it() {
-        assert!(POWERSHELL.is_ascii(), "脚本含非 ASCII 字节，管道解码会破坏它");
+        assert!(
+            POWERSHELL.is_ascii(),
+            "脚本含非 ASCII 字节，管道解码会破坏它"
+        );
     }
 
     #[test]

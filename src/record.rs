@@ -21,7 +21,9 @@ fn record(args: &[String]) -> Result<(), String> {
     };
 
     // 配置读不到（目录不存在、缺 .host）时 filter 未知，照常记录、只是不过滤。
-    let filters = Config::load().map(|config| config.filters).unwrap_or_default();
+    let filters = Config::load()
+        .map(|config| config.filters)
+        .unwrap_or_default();
     if should_skip(&command, &filters) {
         return Ok(());
     }

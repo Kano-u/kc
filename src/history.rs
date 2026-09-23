@@ -12,8 +12,7 @@ CREATE TABLE IF NOT EXISTS history (
 
 fn open(path: &Path) -> Result<Connection, String> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("创建历史目录失败: {error}"))?;
+        std::fs::create_dir_all(parent).map_err(|error| format!("创建历史目录失败: {error}"))?;
     }
     let connection =
         Connection::open(path).map_err(|error| format!("打开历史数据库失败: {error}"))?;
@@ -130,7 +129,10 @@ mod tests {
             &path,
             &[("cargo test", 30, 1), ("dir", 10, 1), ("cd ..", 20, 0)],
         );
-        assert_eq!(load(&path, 10, &[]).unwrap(), vec!["dir", "cd ..", "cargo test"]);
+        assert_eq!(
+            load(&path, 10, &[]).unwrap(),
+            vec!["dir", "cd ..", "cargo test"]
+        );
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
@@ -162,7 +164,11 @@ mod tests {
         let path = temp_db("filter");
         seed(
             &path,
-            &[("git status", 1, 1), ("echo secret", 2, 1), ("cargo test", 3, 1)],
+            &[
+                ("git status", 1, 1),
+                ("echo secret", 2, 1),
+                ("cargo test", 3, 1),
+            ],
         );
 
         let filters = vec![Regex::new("secret").unwrap(), Regex::new("^cargo").unwrap()];
