@@ -1,4 +1,3 @@
-use crate::export;
 use crate::notes::NoteStore;
 use crossterm::{
     event::{
@@ -48,16 +47,10 @@ impl PickResult {
 
 pub fn run(query: &str, history: &[String], notes: &mut NoteStore) -> Result<PickResult, String> {
     let mut terminal = setup_terminal()?;
+    // 删除与改备注直接落在数据库与备注文件上；预览在读它们时产生，没有缓存要回写。
     let outcome = event_loop(&mut terminal, query, history, notes);
-    if let Ok((_, Some(history))) = &outcome {
-        // 删除与改备注只动内存，在这里一次性落盘。必须在 restore_terminal 之前：
-        // 缓存文件一改完，powershell 那边才可能拿新 mtime 读走旧内容、
-        // 或反过来把新 mtime 钉在旧列表上 —— 那会把旧列表锁死一整个会话。
-        // 缓存是派生数据，刷新失败不能反过来改掉用户已经选定的结果。
-        let _ = export::refresh_from(history, notes);
-    }
     restore_terminal(&mut terminal)?;
-    outcome.map(|(result, _)| result)
+    outcome
 }
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>, String> {
@@ -82,7 +75,7 @@ fn event_loop(
     query: &str,
     history: &[String],
     notes: &mut NoteStore,
-) -> Result<(PickResult, Option<Vec<String>>), String> {
+) -> Result<PickResult, String> {
     let mut app = App::new(history, notes, query);
     loop {
         terminal
@@ -100,31 +93,25 @@ fn event_loop(
                 Mode::Search => match key.code {
                     KeyCode::Up => app.move_selection(-1),
                     KeyCode::Down if !app.move_down() => {
-                        return Ok((PickResult::cancel(), app.dirty_history()));
+                        return Ok(PickResult::cancel());
                     }
                     KeyCode::Down => {}
                     KeyCode::PageUp => app.move_selection(-(app.visible_height() as isize)),
                     KeyCode::PageDown => app.move_selection(app.visible_height() as isize),
                     KeyCode::Enter => {
                         if let Some(command) = app.selected_command() {
-                            return Ok((
-                                PickResult {
-                                    action: PickAction::Execute,
-                                    command: Some(command.to_owned()),
-                                },
-                                app.dirty_history(),
-                            ));
+                            return Ok(PickResult {
+                                action: PickAction::Execute,
+                                command: Some(command.to_owned()),
+                            });
                         }
                     }
                     KeyCode::Tab | KeyCode::Right => {
                         if let Some(command) = app.selected_command() {
-                            return Ok((
-                                PickResult {
-                                    action: PickAction::Insert,
-                                    command: Some(command.to_owned()),
-                                },
-                                app.dirty_history(),
-                            ));
+                            return Ok(PickResult {
+                                action: PickAction::Insert,
+                                command: Some(command.to_owned()),
+                            });
                         }
                     }
                     KeyCode::Left => app.enter_note_mode(),
@@ -138,9 +125,9 @@ fn event_loop(
                         app.refresh();
                     }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return Ok((PickResult::cancel(), app.dirty_history()));
+                        return Ok(PickResult::cancel());
                     }
-                    KeyCode::Esc => return Ok((PickResult::cancel(), app.dirty_history())),
+                    KeyCode::Esc => return Ok(PickResult::cancel()),
                     _ => {}
                 },
                 Mode::Note => match key.code {
@@ -170,7 +157,7 @@ fn event_loop(
                         app.note_cursor += 1;
                     }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return Ok((PickResult::cancel(), app.dirty_history()));
+                        return Ok(PickResult::cancel());
                     }
                     _ => {}
                 },
@@ -178,7 +165,7 @@ fn event_loop(
                     KeyCode::Enter => app.confirm_delete(),
                     KeyCode::Esc => app.cancel_delete(),
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return Ok((PickResult::cancel(), app.dirty_history()));
+                        return Ok(PickResult::cancel());
                     }
                     _ => {}
                 },

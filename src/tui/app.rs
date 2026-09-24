@@ -62,8 +62,6 @@ pub(super) struct App<'a> {
     pub(super) confirm_area: Rect,
     pub(super) cancel_area: Rect,
     pub(super) notice: Option<String>,
-    /// 删除是唯一会改内存历史的操作；改备注只动 NoteStore，但缓存里带备注。
-    pub(super) dirty: bool,
 }
 
 impl<'a> App<'a> {
@@ -88,7 +86,6 @@ impl<'a> App<'a> {
             confirm_area: Rect::default(),
             cancel_area: Rect::default(),
             notice: None,
-            dirty: false,
         };
         app.refresh();
         app
@@ -242,7 +239,7 @@ impl<'a> App<'a> {
         self.apply_delete(command, result);
     }
 
-    /// 删除失败时列表、选中项与预览缓存都不动，只把错误显示出来。
+    /// 删除失败时列表与选中项都不动，只把错误显示出来。
     /// 备注删除失败时数据库那行已经没了，但内存列表也回退，所以不改脏标记。
     pub(super) fn apply_delete(&mut self, command: &str, result: Result<(), String>) {
         if let Err(error) = result {
@@ -260,15 +257,7 @@ impl<'a> App<'a> {
 
         if let Err(error) = self.notes.remove(command) {
             self.notice = Some(error);
-            return;
         }
-        self.dirty = true;
-    }
-
-    /// 退出时交给调用方的历史快照：只有真的改过（`dirty`）才给，
-    /// 否则返回 `None`，缓存文件连 mtime 都不动。
-    pub(super) fn dirty_history(&self) -> Option<Vec<String>> {
-        self.dirty.then(|| self.history.clone())
     }
 
     pub(super) fn copy_selected_command(&mut self) {
@@ -294,7 +283,7 @@ impl<'a> App<'a> {
         if let Some(command) = self.note_command.clone() {
             let note = self.note.clone();
             match self.notes.set(&command, &note) {
-                Ok(()) => self.dirty = true,
+                Ok(()) => {}
                 Err(error) => eprintln!("{error}"),
             }
         }
@@ -561,32 +550,29 @@ mod tests {
     }
 
     #[test]
-    fn failed_delete_leaves_the_app_clean() {
+    fn failed_delete_leaves_the_history_untouched() {
         let history = vec!["dir".to_owned(), "ls".to_owned()];
         let mut notes = NoteStore::default();
         let mut app = App::new(&history, &mut notes, "");
-        assert!(!app.dirty, "刚打开时不该有改动");
-        assert!(app.dirty_history().is_none(), "没改动就不该回写缓存");
 
         app.apply_delete("dir", Err("failed".to_owned()));
-        assert!(!app.dirty, "删除失败时没有要回写的内容");
-        assert!(app.dirty_history().is_none());
+        assert_eq!(app.history, history, "删除失败时列表不该变");
     }
 
     #[test]
-    fn delete_hands_out_the_history_without_the_deleted_command() {
+    fn deleting_drops_the_command_from_memory() {
         let history = vec!["dir".to_owned(), "ls".to_owned()];
         let mut notes = notes_for_test("dirty-delete");
         let mut app = App::new(&history, &mut notes, "");
 
         app.selected = 1;
         app.apply_delete("dir", Ok(()));
-        assert_eq!(app.dirty_history(), Some(vec!["ls".to_owned()]));
+        assert_eq!(app.history, vec!["ls".to_owned()]);
         remove_test_notes(&notes);
     }
 
     #[test]
-    fn saving_a_note_marks_the_app_dirty_without_changing_the_history() {
+    fn saving_a_note_leaves_the_history_untouched() {
         let history = vec!["dir".to_owned(), "ls".to_owned()];
         let mut notes = notes_for_test("dirty-note");
         let mut app = App::new(&history, &mut notes, "");
@@ -594,7 +580,7 @@ mod tests {
         app.enter_note_mode();
         app.note = "list files".to_owned();
         app.save_note();
-        assert_eq!(app.dirty_history(), Some(history));
+        assert_eq!(app.history, history);
         remove_test_notes(&notes);
     }
 }

@@ -1,14 +1,9 @@
 use std::path::{Path, PathBuf};
 
 /// 历史数据库固定在用户目录，与同步目录无关，也不参与同步。
+/// 预测器也直接读它，所以这里没有单独的预览缓存。
 pub fn history_db() -> Result<PathBuf, String> {
     Ok(home_dir()?.join(".kc").join("history.db"))
-}
-
-/// 命令预览缓存，与历史数据库同目录：同为本机数据，不参与同步。
-/// 只给 PowerShell 预测器读，路径固定，shell 侧不需要环境变量。
-pub fn preview_cache() -> Result<PathBuf, String> {
-    Ok(home_dir()?.join(".kc").join("preview.tsv"))
 }
 
 /// `kc psreadline-patch` 的工作目录：上游源码、补丁仓库、编译产物都放这里。
@@ -28,7 +23,8 @@ fn home_dir() -> Result<PathBuf, String> {
 }
 
 /// 配置与数据目录必须由 `KC_CONFIG_DIR` 指定，不再猜测默认位置。
-fn config_dir() -> Result<PathBuf, String> {
+/// 预测器也读这里：`*.notes.jsonl` 就是候选行尾备注的来源。
+pub fn config_dir() -> Result<PathBuf, String> {
     config_dir_from(std::env::var_os("KC_CONFIG_DIR").as_deref())
 }
 
@@ -157,13 +153,6 @@ mod tests {
         assert!(!path.starts_with(&config), "{}", path.display());
         std::env::remove_var("KC_CONFIG_DIR");
         std::fs::remove_dir_all(config).unwrap();
-    }
-
-    #[test]
-    fn preview_cache_lives_next_to_the_history_database() {
-        let path = preview_cache().unwrap();
-        assert!(path.ends_with(Path::new(".kc").join("preview.tsv")));
-        assert_eq!(path.parent(), history_db().unwrap().parent());
     }
 
     #[test]

@@ -4,7 +4,7 @@
 
 ## 功能
 
-- 输入命令前缀时，命令行下方列出匹配的 kc 历史与备注（PowerShell 集成）
+- 输入命令前缀时，命令行下方列出匹配的 kc 历史与备注（PowerShell 集成），直接读历史库，其它窗口的改动立即生效
 - 预览列表里有选中项时，`↑`/`↓` 在列表里移动；没有选中项时 `↑` 打开 TUI
 - 顶部工具栏提供“备注”、“复制”和“删除”，也可点击操作
 - 底部搜索，实时过滤命令和备注
@@ -54,14 +54,16 @@ kc init --shell powershell | Out-String | Invoke-Expression
 
 脚本里注册了一个 PSReadLine 预测器：输入命令前缀时，命令行下方列出 kc 历史里匹配的命令，每条候选后面跟着它的备注。
 
-- 候选来自 `kc export` 写出的缓存文件，位置见「命令历史」一节的路径表。预测器读文件而不是调用 kc，按键路径上不会有进程启动开销
-- 缓存文件里最新执行过的命令排在最前，所以输入前缀时拿到的是**最近用过的**匹配命令
-- 预测器只在缓存文件变化时重读；`kc record` 每次记录后都会刷新它，也可以手动执行 `kc export`
-- 只有单行、不含 TAB 的命令会被导出：接受建议时插入的是缓存文件原文，多行命令没法原样插入，这类命令留给 TUI
+- 候选直接来自历史数据库与备注文件，没有中间缓存。预测器是 kc 自己内嵌的 C#，它用 P/Invoke 调 Windows 自带的 `winsqlite3.dll` 读 `history.db`，再从配置目录的 `*.notes.jsonl` 读备注
+- 预测器每次按键只比一次数据源的修改时间与大小（实测 40 µs），只有变了才重读内容；重读后整表常驻内存，按键路径上是内存里的前缀匹配
+- 别的窗口 `kc record` 一条命令、或改了备注，**下一次按键就会看到**，不需要重启 PowerShell
+- 数据库里最新执行过的命令排在最前，所以输入前缀时拿到的是**最近用过的**匹配命令
+- 只有单行命令会进候选：多行命令没法在命令行里原样插入，这类命令留给 TUI（PSReadLine 自己的历史建议同样跳过它们）
 - 匹配是**前缀匹配**（`StartsWith(输入, OrdinalIgnoreCase)`，忽略大小写），跟 PSReadLine 自己的历史预测一致；子串匹配暂不做
 - 候选最多 10 条
-- 预测器是编译成 DLL 的 C#，不是 PowerShell 脚本。这不是偏好：PSReadLine 把预测器放在没有 runspace 的线程池线程上跑，只给 20 ms 预算，解释执行的脚本两边都过不了
-- 首次执行 `kc init` 时会编译一次，约 450 ms；DLL 缓存在 `~/.kc/KcPreviewPredictor-<PowerShell 版本>.dll`，之后启动只读它。**升级 kc 或 PowerShell 后都要删掉这个 DLL 才会重新编译**：程序集绑到具体的 SMA 版本，版本变了旧 DLL 用不了
+- 预测器是编译成 DLL 的 C#，不是 PowerShell 脚本。这不是偏好：PSReadLine 把预测器放在没有 runspace 的线程池线程上跑，解释执行的脚本在那里跑不了。P/Invoke 恰好绕开了这条限制，所以能直接读 SQLite
+- 读 SQLite 依赖 Windows 自带的 `winsqlite3.dll`，因此这一节只适用于 Windows。zsh 侧不用预测器，不受影响
+- 首次执行 `kc init` 时会编译一次，约 450 ms；DLL 缓存在 `~/.kc/KcPreviewPredictor-<PowerShell 版本>.dll`，之后启动只读它。**升级 kc 或 PowerShell 后都要删掉这个 DLL 才会重新编译**：程序集绑到具体的 SMA 版本，版本变了旧 DLL 用不了，而 `kc init` 只检查文件是否存在、不比对内容 —— 不删就会继续跑旧预测器
 - 升级 kc 后需要重新执行上面的 `kc init` 才会生效
 - `↓` 进入候选列表并在列表内下移，`↑` 在已选中时上移；没有任何选中项时 `↑` 才打开 kc TUI。判断选中状态需要 `prediction-selection` 补丁，见下一节
 - `F2` 在 Inline 与 ListView 之间切换，预览默认用 ListView
@@ -129,17 +131,16 @@ kc 自己记录命令历史。
 
 记录由 PowerShell 的 `prompt` 钩子驱动：每次提示符出现前，kc 读取刚执行的那条命令，连同成功/失败一并写入数据库。失败的命令同样记录。
 
-历史数据库与预览缓存都固定在用户目录，不参与同步：
+历史数据库固定在用户目录，不参与同步：
 
-| 平台 | 历史数据库 | 预览缓存 |
-| --- | --- | --- |
-| Windows | `%USERPROFILE%\.kc\history.db` | `%USERPROFILE%\.kc\preview.tsv` |
-| 其他 | `~/.kc/history.db` | `~/.kc/preview.tsv` |
+| 平台 | 历史数据库 |
+| --- | --- |
+| Windows | `%USERPROFILE%\.kc\history.db` |
+| 其他 | `~/.kc/history.db` |
 
 数据库是 SQLite，`command` 是主键，同名命令只保留一条，重复执行刷新时间戳。删除是物理删除，文件里不留痕迹。
 
-TUI 里的删除与改备注只改数据库和备注文件，**预览缓存要到退出 TUI 时才回写一次**（用 TUI 手上的内存列表，不重读库）。
-所以别的 PowerShell 窗口在 TUI 关掉之前，仍可能把已删的命令当作候选。
+命令预览直接读这个数据库与备注文件，没有派生缓存。所以在 TUI 里删除或改备注后，别的 PowerShell 窗口的下一次按键就能看到结果。
 
 ### 导入 PowerShell 历史
 

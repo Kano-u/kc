@@ -1,13 +1,15 @@
 use crate::args;
-use crate::data_paths::preview_cache;
+use crate::data_paths::{config_dir, history_db};
 use std::path::Path;
 use std::process::ExitCode;
 
 const USAGE: &str = "kc init --shell powershell|zsh";
 const ALLOWED: &[&str] = &["--shell"];
 
-/// 缓存文件的绝对路径在运行时替换进来：脚本本体是编译期常量，必须保持纯 ASCII。
-const PREVIEW_PATH: &str = "@KC_PREVIEW_PATH@";
+/// 历史数据库与备注目录以 base64 形式内嵌：脚本本体必须保持纯 ASCII，
+/// 而 KC_CONFIG_DIR 可能含非 ASCII（如 `D:\0\32_文档\kc_data`）。
+const HISTORY_PATH: &str = "@KC_HISTORY_DB@";
+const NOTES_DIR: &str = "@KC_NOTES_DIR@";
 /// C# 源码以 base64 形式内嵌，同样是 ASCII。
 const PREDICTOR_URI: &str = "@KC_PREDICTOR_URI@";
 
@@ -44,7 +46,7 @@ fn rendered_powershell() -> Result<String, String> {
         "data:text/plain;charset=utf-8;base64,{}",
         base64(PREDICTOR.as_bytes())
     );
-    Ok(script(&preview_cache()?, &uri))
+    Ok(script(&history_db()?, &config_dir()?, &uri))
 }
 
 /// zsh 版本不碰预测器，也就没有 base64 与路径占位符要替换：整份脚本是一个常量。
@@ -52,10 +54,12 @@ fn rendered_zsh() -> &'static str {
     ZSH
 }
 
-/// 路径写进 PowerShell 单引号字符串：反斜杠不被解释，路径里的单引号写成两个。
-fn script(path: &Path, uri: &str) -> String {
-    let literal = path.to_string_lossy().replace('\'', "''");
-    let script = POWERSHELL.replace(PREVIEW_PATH, &literal);
+/// 路径经 base64 内嵌，在脚本里解码。直接写路径会带进非 ASCII 字节，
+/// 而脚本要过管道解码（用控制台代码页），非 UTF-8 代码页上会被解坏。
+fn script(history_db: &Path, notes_dir: &Path, uri: &str) -> String {
+    let script = POWERSHELL
+        .replace(HISTORY_PATH, &base64(history_db.to_string_lossy().as_bytes()))
+        .replace(NOTES_DIR, &base64(notes_dir.to_string_lossy().as_bytes()));
     script.replace(PREDICTOR_URI, uri)
 }
 
@@ -149,17 +153,25 @@ const POWERSHELL: &str = r#"# Keep this block as the last statement of the profi
 # It defines global:prompt, so any prompt defined after it would win
 # and commands would silently stop reaching the history database.
 
-$global:KcPreviewPath = '@KC_PREVIEW_PATH@'
+# The paths arrive base64-encoded so this script stays pure ASCII: KC_CONFIG_DIR may
+# contain non-ASCII characters, and the pipe that feeds Invoke-Expression decodes with
+# the console codepage, which mangles them on a non-UTF-8 terminal (e.g. 936).
+$KcUtf8 = [System.Text.Encoding]::UTF8
+$global:KcHistoryDb = $KcUtf8.GetString(
+    [System.Convert]::FromBase64String('@KC_HISTORY_DB@'))
+$global:KcNotesDir = $KcUtf8.GetString(
+    [System.Convert]::FromBase64String('@KC_NOTES_DIR@'))
 
 # The predictor is compiled C#, not a PowerShell class, and the source travels as a
 # base64 data URI so this script stays pure ASCII. Two PSReadLine facts force this:
 # it runs the predictor on a thread-pool thread where no runspace exists, so a
-# PowerShell class cannot execute there at all; and it allows the predictor only
-# 20 ms, which interpreted script cannot meet. Compiling costs ~450 ms, so the
-# assembly is cached next to the cache file and keyed by the PowerShell version.
-$KcPredictorSource = [System.Text.Encoding]::UTF8.GetString(
+# PowerShell class cannot execute there at all; and it calls the predictor from the
+# render path, where interpreted script would be felt on every keystroke.
+# Compiling costs ~450 ms, so the assembly is cached under the data directory and
+# keyed by the PowerShell version.
+$KcPredictorSource = $KcUtf8.GetString(
     [System.Convert]::FromBase64String(('@KC_PREDICTOR_URI@' -split ',', 2)[1]))
-$KcPreviewDll = Join-Path (Split-Path -Parent $global:KcPreviewPath) `
+$KcPreviewDll = Join-Path (Split-Path -Parent $global:KcHistoryDb) `
     "KcPreviewPredictor-$($PSVersionTable.PSVersion).dll"
 
 if (-not (Test-Path -LiteralPath $KcPreviewDll)) {
@@ -175,7 +187,7 @@ if (-not ("KcPreviewPredictor" -as [type])) {
     Add-Type -Path $KcPreviewDll
 }
 
-$global:KcPreviewPredictor = [KcPreviewPredictor]::new($global:KcPreviewPath)
+$global:KcPreviewPredictor = [KcPreviewPredictor]::new($global:KcHistoryDb, $global:KcNotesDir)
 [System.Management.Automation.Subsystem.SubsystemManager]::RegisterSubsystem(
     [System.Management.Automation.Subsystem.SubsystemKind]::CommandPredictor,
     $global:KcPreviewPredictor
@@ -186,7 +198,7 @@ $global:KcPreviewPredictor = [KcPreviewPredictor]::new($global:KcPreviewPath)
 Set-PSReadLineOption -PredictionSource Plugin
 Set-PSReadLineOption -PredictionViewStyle ListView
 
-Remove-Variable KcPredictorSource, KcPreviewDll, KcPreviewTemp -ErrorAction SilentlyContinue
+Remove-Variable KcPredictorSource, KcPreviewDll, KcPreviewTemp, KcUtf8 -ErrorAction SilentlyContinue
 
 $global:KcLastId = -1
 
@@ -271,14 +283,45 @@ Set-PSReadLineKeyHandler -Chord UpArrow -BriefDescription "Runs kc history picke
 /// 预测器源码。方法体里只能出现 .NET 调用：它跑在 PSReadLine 的线程池线程上，
 /// 那里没有 runspace，cmdlet 与类内方法调用都会失败（而且失败会被静默吞掉）。
 /// 类型全部写全限定名，因为这段代码经 `Add-Type` 编译时没有 `using` 命名空间。
+///
+/// 它直接读 `history.db` 与 `*.notes.jsonl`，不再需要 `kc` 预先导出任何缓存：
+/// SQLite 走 P/Invoke 到 Windows 自带的 `winsqlite3.dll` —— 这恰好绕开了
+/// “线程池线程上没有 runspace”的限制，因为 P/Invoke 不经过 PowerShell。
 const PREDICTOR: &str = r#"public sealed class KcPreviewPredictor : System.Management.Automation.Subsystem.Prediction.ICommandPredictor
 {
-    private readonly string _path;
-    // 顺序即优先级：缓存文件里最新的命令排在最上面，所以按顺序取前 10 条就是最近用过的 10 条。
+    // Windows 自带 winsqlite3.dll，所以这个 P/Invoke 不引入任何依赖。
+    private const int SqliteOk = 0;
+    private const int SqliteRow = 100;
+    private const int SqliteOpenReadOnly = 1;
+
+    [System.Runtime.InteropServices.DllImport("winsqlite3.dll", CallingConvention = System.Runtime.InteropServices.CallingConvention.Cdecl)]
+    private static extern int sqlite3_open_v2(byte[] filename, out System.IntPtr db, int flags, System.IntPtr vfs);
+    [System.Runtime.InteropServices.DllImport("winsqlite3.dll", CallingConvention = System.Runtime.InteropServices.CallingConvention.Cdecl)]
+    private static extern int sqlite3_busy_timeout(System.IntPtr db, int milliseconds);
+    [System.Runtime.InteropServices.DllImport("winsqlite3.dll", CallingConvention = System.Runtime.InteropServices.CallingConvention.Cdecl)]
+    private static extern int sqlite3_prepare_v2(System.IntPtr db, byte[] sql, int length, out System.IntPtr statement, System.IntPtr tail);
+    [System.Runtime.InteropServices.DllImport("winsqlite3.dll", CallingConvention = System.Runtime.InteropServices.CallingConvention.Cdecl)]
+    private static extern int sqlite3_step(System.IntPtr statement);
+    [System.Runtime.InteropServices.DllImport("winsqlite3.dll", CallingConvention = System.Runtime.InteropServices.CallingConvention.Cdecl)]
+    private static extern System.IntPtr sqlite3_column_text(System.IntPtr statement, int column);
+    [System.Runtime.InteropServices.DllImport("winsqlite3.dll", CallingConvention = System.Runtime.InteropServices.CallingConvention.Cdecl)]
+    private static extern int sqlite3_column_bytes(System.IntPtr statement, int column);
+    [System.Runtime.InteropServices.DllImport("winsqlite3.dll", CallingConvention = System.Runtime.InteropServices.CallingConvention.Cdecl)]
+    private static extern int sqlite3_finalize(System.IntPtr statement);
+    [System.Runtime.InteropServices.DllImport("winsqlite3.dll", CallingConvention = System.Runtime.InteropServices.CallingConvention.Cdecl)]
+    private static extern int sqlite3_close(System.IntPtr db);
+
+    private readonly string _dbPath;
+    private readonly string _notesDir;
+
+    // 顺序即优先级：查询已按 `at DESC` 排好，所以按顺序取前 10 条就是最近用过的 10 条。
     // 不能用字典 —— 字典不保证迭代顺序，候选会退化成随机 10 条。
     private readonly System.Collections.Generic.List<System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion> _entries =
         new System.Collections.Generic.List<System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion>();
-    private System.DateTime _stamp = System.DateTime.MinValue;
+
+    // 源文件的修改时间与大小。每按一键只比一次，内容只在变化时重读。
+    private string _stamp;
+
     private readonly System.Collections.Generic.List<System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion> _list;
     private readonly System.Management.Automation.Subsystem.Prediction.SuggestionPackage _package;
 
@@ -287,9 +330,10 @@ const PREDICTOR: &str = r#"public sealed class KcPreviewPredictor : System.Manag
     public string Description => "kc history preview";
     public System.Collections.Generic.Dictionary<string, string> FunctionsToDefine => null;
 
-    public KcPreviewPredictor(string path)
+    public KcPreviewPredictor(string dbPath, string notesDir)
     {
-        _path = path;
+        _dbPath = dbPath;
+        _notesDir = notesDir;
         // SuggestionPackage refuses an empty list, so it is built once around a seed
         // entry and every call reuses the list inside it, emptied first.
         var seed = new System.Collections.Generic.List<System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion>();
@@ -299,31 +343,6 @@ const PREDICTOR: &str = r#"public sealed class KcPreviewPredictor : System.Manag
         _list.Clear();
     }
 
-    private void Reload()
-    {
-        _entries.Clear();
-        _stamp = System.DateTime.MinValue;
-        if (!System.IO.File.Exists(_path))
-        {
-            return;
-        }
-        _stamp = System.IO.File.GetLastWriteTimeUtc(_path);
-        // The notes are UTF-8; the default encoding would mangle them.
-        foreach (var line in System.IO.File.ReadAllLines(_path, System.Text.Encoding.UTF8))
-        {
-            int split = line.IndexOf('\t');
-            if (split <= 0)
-            {
-                continue;
-            }
-            // The note is display-only and rides in ToolTip; it never reaches the
-            // command line. An empty note becomes null, not an empty string.
-            string note = line.Substring(split + 1);
-            _entries.Add(new System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion(
-                line.Substring(0, split), note.Length == 0 ? null : note));
-        }
-    }
-
     public System.Management.Automation.Subsystem.Prediction.SuggestionPackage GetSuggestion(
         System.Management.Automation.Subsystem.Prediction.PredictionClient client,
         System.Management.Automation.Subsystem.Prediction.PredictionContext context,
@@ -331,13 +350,18 @@ const PREDICTOR: &str = r#"public sealed class KcPreviewPredictor : System.Manag
     {
         _list.Clear();
 
-        // One stat per keystroke: the file is only re-read when kc rewrote it.
-        if (System.IO.File.Exists(_path))
+        // One stat per keystroke: only re-read when the database or a notes file changed.
+        // A transient failure keeps the previous snapshot rather than emptying the list.
+        string current = Stamp();
+        if (current != _stamp)
         {
-            System.DateTime current = System.IO.File.GetLastWriteTimeUtc(_path);
-            if (current != _stamp)
+            _stamp = current;
+            try
             {
                 Reload();
+            }
+            catch
+            {
             }
         }
 
@@ -358,6 +382,181 @@ const PREDICTOR: &str = r#"public sealed class KcPreviewPredictor : System.Manag
         }
 
         return _package;
+    }
+
+    /// 历史数据库与所有备注文件的修改时间与大小。任一变化都足以触发重读。
+    private string Stamp()
+    {
+        var stamp = new System.Text.StringBuilder();
+        AppendStamp(stamp, _dbPath);
+        if (!string.IsNullOrEmpty(_notesDir) && System.IO.Directory.Exists(_notesDir))
+        {
+            string[] files = System.IO.Directory.GetFiles(_notesDir, "*.notes.jsonl");
+            System.Array.Sort(files, System.StringComparer.Ordinal);
+            foreach (var file in files)
+            {
+                AppendStamp(stamp, file);
+            }
+        }
+        return stamp.ToString();
+    }
+
+    private static void AppendStamp(System.Text.StringBuilder stamp, string path)
+    {
+        try
+        {
+            var info = new System.IO.FileInfo(path);
+            if (info.Exists)
+            {
+                stamp.Append(info.LastWriteTimeUtc.Ticks).Append(':').Append(info.Length);
+            }
+        }
+        catch
+        {
+        }
+        stamp.Append('|');
+    }
+
+    private void Reload()
+    {
+        _entries.Clear();
+        var notes = ReadNotes();
+        foreach (var command in ReadCommands())
+        {
+            string note;
+            notes.TryGetValue(command, out note);
+            // The note is display-only and rides in ToolTip; it never reaches the
+            // command line. An empty note becomes null, not an empty string.
+            _entries.Add(new System.Management.Automation.Subsystem.Prediction.PredictiveSuggestion(
+                command, string.IsNullOrEmpty(note) ? null : note));
+        }
+    }
+
+    /// 按最近使用在前读出全部命令。整表载入内存，按键路径上就不必再碰数据库。
+    /// 全量只发生在源文件变化时，实测 2 万条约 17 ms。
+    private System.Collections.Generic.List<string> ReadCommands()
+    {
+        var commands = new System.Collections.Generic.List<string>();
+        if (!System.IO.File.Exists(_dbPath))
+        {
+            return commands;
+        }
+        System.IntPtr db;
+        if (sqlite3_open_v2(Utf8Z(_dbPath), out db, SqliteOpenReadOnly, System.IntPtr.Zero) != SqliteOk)
+        {
+            return commands;
+        }
+        try
+        {
+            // A writer holds the lock only briefly; wait instead of failing outright.
+            sqlite3_busy_timeout(db, 100);
+            System.IntPtr statement;
+            if (sqlite3_prepare_v2(db, Utf8Z("SELECT command FROM history ORDER BY at DESC"), -1, out statement, System.IntPtr.Zero) != SqliteOk)
+            {
+                return commands;
+            }
+            try
+            {
+                while (sqlite3_step(statement) == SqliteRow)
+                {
+                    string command = Column(statement, 0);
+                    if (string.IsNullOrEmpty(command))
+                    {
+                        continue;
+                    }
+                    // PSReadLine's own history suggestions skip multi-line commands,
+                    // and the command line cannot hold one verbatim.
+                    if (command.IndexOf('\n') != -1 || command.IndexOf('\r') != -1)
+                    {
+                        continue;
+                    }
+                    commands.Add(command);
+                }
+            }
+            finally
+            {
+                sqlite3_finalize(statement);
+            }
+        }
+        finally
+        {
+            sqlite3_close(db);
+        }
+        return commands;
+    }
+
+    /// 合并目录下所有 `*.notes.jsonl`；同名命令取 `updated_at` 较新的一条，
+    /// 与 kc 自己的合并规则一致。文件按路径排序，使结果与枚举顺序无关。
+    private System.Collections.Generic.Dictionary<string, string> ReadNotes()
+    {
+        var notes = new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.Ordinal);
+        var stamps = new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.Ordinal);
+        if (string.IsNullOrEmpty(_notesDir) || !System.IO.Directory.Exists(_notesDir))
+        {
+            return notes;
+        }
+        string[] files = System.IO.Directory.GetFiles(_notesDir, "*.notes.jsonl");
+        System.Array.Sort(files, System.StringComparer.Ordinal);
+        foreach (var file in files)
+        {
+            // The notes are UTF-8; the default encoding would mangle them.
+            foreach (var line in System.IO.File.ReadAllLines(file, System.Text.Encoding.UTF8))
+            {
+                if (line.Length == 0)
+                {
+                    continue;
+                }
+                try
+                {
+                    using (var document = System.Text.Json.JsonDocument.Parse(line))
+                    {
+                        var root = document.RootElement;
+                        string command = root.GetProperty("command").GetString();
+                        if (string.IsNullOrEmpty(command))
+                        {
+                            continue;
+                        }
+                        string note = root.TryGetProperty("note", out var noteElement) ? noteElement.GetString() : null;
+                        string updated = root.TryGetProperty("updated_at", out var stampElement) ? stampElement.GetString() : "";
+                        string previous;
+                        if (!stamps.TryGetValue(command, out previous) || System.String.CompareOrdinal(previous, updated) <= 0)
+                        {
+                            stamps[command] = updated;
+                            notes[command] = note ?? "";
+                        }
+                    }
+                }
+                catch
+                {
+                }
+            }
+        }
+        return notes;
+    }
+
+    private static byte[] Utf8Z(string value)
+    {
+        byte[] bytes = System.Text.Encoding.UTF8.GetBytes(value);
+        byte[] terminated = new byte[bytes.Length + 1];
+        System.Array.Copy(bytes, terminated, bytes.Length);
+        return terminated;
+    }
+
+    private static string Column(System.IntPtr statement, int index)
+    {
+        System.IntPtr pointer = sqlite3_column_text(statement, index);
+        if (pointer == System.IntPtr.Zero)
+        {
+            return null;
+        }
+        int length = sqlite3_column_bytes(statement, index);
+        if (length == 0)
+        {
+            return "";
+        }
+        byte[] buffer = new byte[length];
+        System.Runtime.InteropServices.Marshal.Copy(pointer, buffer, 0, length);
+        return System.Text.Encoding.UTF8.GetString(buffer);
     }
 
     public bool CanAcceptFeedback(
@@ -437,22 +636,37 @@ mod tests {
             "脚本含非 ASCII 字节，管道解码会破坏它"
         );
         assert!(PREDICTOR_URI.is_ascii());
-        let output = script(Path::new(r"C:\Users\k\.kc\preview.tsv"), "data:,");
+        let output = script(
+            Path::new(r"C:\Users\k\.kc\history.db"),
+            Path::new(r"C:\Users\k\kc"),
+            "data:,",
+        );
         assert!(output.is_ascii(), "生成脚本含非 ASCII 字节");
     }
 
     #[test]
-    fn writes_the_preview_cache_path_as_a_single_quoted_literal() {
-        let path = Path::new(r"C:\Users\k\.kc\preview.tsv");
-        let output = script(path, "data:,");
-        assert!(output.contains(r"$global:KcPreviewPath = 'C:\Users\k\.kc\preview.tsv'"));
-        assert!(!output.contains(PREVIEW_PATH), "占位符没有被替换");
+    fn writes_the_history_and_notes_paths_as_decoded_base64() {
+        let output = script(
+            Path::new(r"C:\Users\k\.kc\history.db"),
+            Path::new(r"C:\Users\k\kc"),
+            "data:,",
+        );
+        assert!(output.contains("$global:KcHistoryDb = $KcUtf8.GetString("));
+        assert!(output.contains("$global:KcNotesDir = $KcUtf8.GetString("));
+        assert!(!output.contains(HISTORY_PATH), "占位符没有被替换");
+        assert!(!output.contains(NOTES_DIR), "占位符没有被替换");
+        // 路径本身不能出现在脚本里：非 ASCII 路径会破坏纯 ASCII 约束。
+        assert!(!output.contains(r"C:\Users\k\.kc\history.db"));
     }
 
     #[test]
-    fn doubles_single_quotes_in_the_preview_path() {
-        let output = script(Path::new("/tmp/it's/preview.tsv"), "data:,");
-        assert!(output.contains("$global:KcPreviewPath = '/tmp/it''s/preview.tsv'"));
+    fn encodes_a_non_ascii_notes_directory_without_breaking_ascii() {
+        // KC_CONFIG_DIR 可能含中文（如 D:\0\32_文档\kc_data），
+        // 直接写进脚本会引入非 ASCII 字节。
+        let non_ascii = Path::new("D:\\0\\32_文档\\kc_data");
+        let output = script(Path::new("h"), non_ascii, "data:,");
+        assert!(output.is_ascii(), "含非 ASCII 路径时脚本仍必须是 ASCII");
+        assert!(!output.contains("文档"));
     }
 
     #[test]
@@ -461,7 +675,7 @@ mod tests {
             "data:text/plain;charset=utf-8;base64,{}",
             base64(PREDICTOR.as_bytes())
         );
-        let output = script(Path::new("p"), &uri);
+        let output = script(Path::new("p"), Path::new("n"), &uri);
         assert!(!output.contains(PREDICTOR_URI), "占位符没有被替换");
         assert!(
             !output.contains("public sealed class"),
@@ -491,8 +705,45 @@ mod tests {
             );
         }
         assert!(PREDICTOR.contains("System.IO.File.ReadAllLines"));
-        assert!(PREDICTOR.contains("System.IO.File.GetLastWriteTimeUtc"));
         assert!(PREDICTOR.contains("System.Text.Encoding.UTF8"));
+    }
+
+    #[test]
+    fn the_predictor_reads_the_database_through_winsqlite3() {
+        // 直接读 SQLite 是本次改动的全部要点：线程池线程上没有 runspace，
+        // 只有 P/Invoke 能到达数据库，且不引入任何外部依赖。
+        assert!(PREDICTOR.contains(r#"DllImport("winsqlite3.dll""#));
+        assert!(PREDICTOR.contains("sqlite3_open_v2"));
+        assert!(PREDICTOR.contains("SELECT command FROM history ORDER BY at DESC"));
+        assert!(PREDICTOR.contains("sqlite3_busy_timeout"));
+        assert!(PREDICTOR.contains("sqlite3_finalize"));
+        assert!(PREDICTOR.contains("sqlite3_close"));
+    }
+
+    #[test]
+    fn the_predictor_merges_every_notes_file_by_updated_at() {
+        // 与 notes.rs 同规则：同名命令取 updated_at 较新的一条，
+        // 且文件名排序使结果与枚举顺序无关。
+        assert!(PREDICTOR.contains(r#"GetFiles(_notesDir, "*.notes.jsonl")"#));
+        assert!(PREDICTOR.contains("System.Array.Sort(files, System.StringComparer.Ordinal)"));
+        assert!(PREDICTOR.contains("System.String.CompareOrdinal(previous, updated) <= 0"));
+        assert!(PREDICTOR.contains("System.Text.Json.JsonDocument.Parse"));
+    }
+
+    #[test]
+    fn the_predictor_reloads_only_when_a_source_file_changes() {
+        // 每按一键只比一次修改时间+大小；内容重读很贵（2 万条约 17 ms）。
+        assert!(PREDICTOR.contains("string current = Stamp();"));
+        assert!(PREDICTOR.contains("if (current != _stamp)"));
+        assert!(PREDICTOR.contains("LastWriteTimeUtc.Ticks"));
+        assert!(PREDICTOR.contains(".Append(info.Length)"));
+    }
+
+    #[test]
+    fn the_predictor_skips_multiline_commands() {
+        // PSReadLine 自己的历史建议也跳过含换行的命令，行内插不下它们。
+        assert!(PREDICTOR.contains("command.IndexOf('\\n') != -1"));
+        assert!(PREDICTOR.contains("command.IndexOf('\\r') != -1"));
     }
 
     #[test]
@@ -501,14 +752,14 @@ mod tests {
         assert!(PREDICTOR.contains(
             "entry.SuggestionText.StartsWith(prefix, System.StringComparison.OrdinalIgnoreCase)"
         ));
-        assert!(PREDICTOR.contains("note.Length == 0 ? null : note"));
+        assert!(PREDICTOR.contains("string.IsNullOrEmpty(note) ? null : note"));
         assert!(PREDICTOR.contains("_package.SuggestionEntries"));
         assert!(PREDICTOR.contains("_list.Clear()"));
     }
 
     #[test]
-    fn the_predictor_keeps_the_cache_file_order() {
-        // 字典不保证迭代顺序，候选会变成随机 10 条；文件已按最新在上排好，必须按顺序取。
+    fn the_predictor_keeps_the_query_order() {
+        // 字典不保证迭代顺序，候选会变成随机 10 条；查询已按最新在上排好，必须按顺序取。
         assert!(
             !PREDICTOR.contains("Dictionary<string, string> _entries"),
             "候选不能用无序容器存"
@@ -536,7 +787,9 @@ mod tests {
 
     #[test]
     fn registers_the_predictor_with_its_full_type_names() {
-        assert!(POWERSHELL.contains("[KcPreviewPredictor]::new($global:KcPreviewPath)"));
+        assert!(POWERSHELL.contains(
+            "[KcPreviewPredictor]::new($global:KcHistoryDb, $global:KcNotesDir)"
+        ));
         assert!(POWERSHELL.contains(
             "[System.Management.Automation.Subsystem.SubsystemManager]::RegisterSubsystem("
         ));

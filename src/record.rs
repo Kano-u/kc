@@ -1,7 +1,6 @@
 use crate::app::Config;
 use crate::args;
 use crate::data_paths::history_db;
-use crate::export;
 use crate::history;
 use std::process::ExitCode;
 
@@ -31,9 +30,7 @@ fn record(args: &[String]) -> Result<(), String> {
     let config = Config::load()?;
     history::upsert(&history_db()?, &command, succeeded(), &config)?;
 
-    // 这条命令已经进库了；预览缓存是派生数据，刷新失败不能反过来影响记录 ——
-    // record 跑在提示符路径上，任何报错都只会变成提示符前的噪音。
-    let _ = export::refresh();
+    // 预览直接在读库时发生，不再有派生缓存需要刷新。
     Ok(())
 }
 
