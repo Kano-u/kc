@@ -46,7 +46,7 @@ pub(super) fn copy_to_clipboard(text: &str) -> Result<(), String> {
         Ok(())
     }
 
-    /// Termux 是唯一的非 Windows 目标，只认这一个命令，不装就报错。
+    // Termux 是唯一的非 Windows 目标，只认这一个命令，不装就报错。
     #[cfg(not(windows))]
     {
         use std::io::Write;
