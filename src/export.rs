@@ -32,7 +32,13 @@ pub fn main(args: &[String]) -> ExitCode {
 pub fn refresh() -> Result<(PathBuf, usize), String> {
     let history = history::load(&history_db()?, u32::MAX)?;
     let notes = NoteStore::load()?;
-    let lines = render(&history, &notes);
+    refresh_from(&history, &notes)
+}
+
+/// 用调用方手里的历史快照落盘：不重开数据库，也不重解析备注文件。
+/// TUI 退出时走这条路 —— 它手上的列表就是删除与改备注之后的权威状态。
+pub fn refresh_from(history: &[String], notes: &NoteStore) -> Result<(PathBuf, usize), String> {
+    let lines = render(history, notes);
     let path = preview_cache()?;
     write_cache(&path, &lines)?;
     Ok((path, lines.len()))
