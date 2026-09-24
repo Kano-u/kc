@@ -118,6 +118,7 @@ eval "$(kc init --shell zsh)"
 这段输出必须放在最后一行：它注册 `precmd`/`preexec` 钩子，之后定义的钩子虽然照样工作，但 kc 会看不到要记录的命令。
 
 - 记录方式：`preexec` 抓命令原文，`precmd` 取 `$?`。成功失败都记，空回车不记
+- `precmd` 里 `local ok=$?` 必须是第一条语句：它前面任何语句都会把真实状态码冲掉
 - `↑` 打开 kc TUI；`Enter` 执行、`Tab`/`→` 插入不执行、`Esc` 取消且命令行不变
 - `↑` 不再浏览 zsh 历史，原生 `Ctrl+R` 反向搜索保留不动
 - 需要设置 `KC_CONFIG_DIR`（与其它平台一致），历史库仍在 `~/.kc/history.db`
