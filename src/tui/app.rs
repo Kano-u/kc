@@ -126,6 +126,10 @@ impl<'a> App<'a> {
         } else if self.selected >= self.scroll_offset + height {
             self.scroll_offset = self.selected + 1 - height;
         }
+        // 窗口不会高出底部：终端变高后旧偏移会在顶部留下空行，压回满窗。
+        self.scroll_offset = self
+            .scroll_offset
+            .min(self.filtered.len().saturating_sub(height));
     }
 
     pub(super) fn move_selection(&mut self, delta: isize) {
@@ -252,6 +256,10 @@ impl<'a> App<'a> {
 
         self.history.remove(history_index);
         self.rebuild_filtered();
+        // 列表底部对齐：删除一行后，它上面的命令整体下移一行补位，
+        // 它下面的行连屏幕位置一起不动。最上面没有更旧的命令时
+        // 偏移已在 0，只能退化成下面的命令上移。
+        self.scroll_offset = self.scroll_offset.saturating_sub(1);
         self.selected = selection_after_removal(self.selected, self.filtered.len());
         self.clamp_scroll();
 
@@ -447,8 +455,26 @@ mod tests {
         app.apply_delete("cmd9", Ok(()));
         assert_eq!(app.filtered.len(), 9);
         assert_eq!(app.selected_command(), Some("cmd8"));
-        // 视口跟着上移一行，旧命令补位，不出现跳空。
-        assert_eq!(app.scroll_offset, 7);
+        // 视口上移一行，更旧的命令从顶部补位，窗口仍然是满的。
+        assert_eq!(app.scroll_offset, 6);
+        assert_eq!(app.list_top(), 0);
+    }
+
+    #[test]
+    fn deleting_a_row_shifts_only_the_commands_above_it() {
+        let history: Vec<String> = (0..10).map(|index| format!("cmd{index}")).collect();
+        let mut notes = NoteStore::default();
+        let mut app = App::new(&history, &mut notes, "");
+        // 视口高度 4，向上滚到 cmd3..cmd6，选中中间的 cmd5。
+        app.list_area = ratatui::layout::Rect::new(0, 0, 20, 4);
+        app.selected = 5;
+        app.scroll_offset = 3;
+
+        app.apply_delete("cmd5", Ok(()));
+        assert_eq!(app.scroll_offset, 2);
+        // cmd3、cmd4 下移一行补位；cmd6 留在原行，cmd2 从顶部进入。
+        assert_eq!(app.filtered[app.scroll_offset..][..4], ["cmd2", "cmd3", "cmd4", "cmd6"]);
+        assert_eq!(app.selected_command(), Some("cmd4"));
     }
 
     #[test]
