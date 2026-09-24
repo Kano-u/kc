@@ -48,7 +48,7 @@ cargo install --path . --force
 kc init --shell powershell | Out-String | Invoke-Expression
 ```
 
-这段输出必须放在 profile 的最后一行：它定义 `global:prompt`，之后定义的 prompt 会把它覆盖掉，命令就会悄悄不再进历史。
+这段输出必须放在 profile 的最后一行。
 
 ### 命令预览
 
@@ -99,7 +99,6 @@ PS D:\> npx
 - 补丁只装进当前用户的模块目录，不动系统目录，也不需要管理员权限
 - **升级 PowerShell 后要重跑一次**：PSReadLine 随 PowerShell 一起升级，版本号变了就得对着新版本重新打一次
 - 装完要重启 PowerShell 窗口才生效
-- 注：这是个人自用的改动，不向上游提交。打补丁后每行不再标注来源，来源仍可从底部 `<kc(10)>` 和 `Ctrl+↑↓` 看到
 
 ## zsh（Termux）集成
 
@@ -115,7 +114,7 @@ pkg install jq
 eval "$(kc init --shell zsh)"
 ```
 
-这段输出必须放在最后一行：它注册 `precmd`/`preexec` 钩子，之后定义的钩子虽然照样工作，但 kc 会看不到要记录的命令。
+这段输出必须放在最后一行。
 
 - 记录方式：`preexec` 抓命令原文，`precmd` 取 `$?`。成功失败都记，空回车不记
 - `precmd` 里 `local ok=$?` 必须是第一条语句：它前面任何语句都会把真实状态码冲掉
@@ -126,11 +125,11 @@ eval "$(kc init --shell zsh)"
 
 ## 命令历史
 
-kc 自己记录命令历史，不依赖 Atuin 等外部工具。
+kc 自己记录命令历史。
 
 记录由 PowerShell 的 `prompt` 钩子驱动：每次提示符出现前，kc 读取刚执行的那条命令，连同成功/失败一并写入数据库。失败的命令同样记录。
 
-历史数据库与预览缓存都固定在用户目录，与同步目录无关，也不参与同步：
+历史数据库与预览缓存都固定在用户目录，不参与同步：
 
 | 平台 | 历史数据库 | 预览缓存 |
 | --- | --- | --- |
@@ -183,7 +182,7 @@ filter = [
 
 ### 配置与数据目录
 
-kc 不猜测默认位置，`KC_CONFIG_DIR` 必须设置。kc 从该目录查找 `.host`、`*.config.toml` 和 `*.notes.jsonl`。未设置时直接报错退出。
+`KC_CONFIG_DIR` 必须设置。kc 从该目录查找 `.host`、`*.config.toml` 和 `*.notes.jsonl`。未设置时直接报错退出。
 
 ```bash
 export KC_CONFIG_DIR="$HOME/kc"
