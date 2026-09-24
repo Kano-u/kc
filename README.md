@@ -101,6 +101,28 @@ PS D:\> npx
 - 装完要重启 PowerShell 窗口才生效
 - 注：这是个人自用的改动，不向上游提交。打补丁后每行不再标注来源，来源仍可从底部 `<kc(10)>` 和 `Ctrl+↑↓` 看到
 
+## zsh（Termux）集成
+
+依赖 `jq`，先装：
+
+```sh
+pkg install jq
+```
+
+在 `.zshrc` 的**最后一行**加：
+
+```zsh
+eval "$(kc init --shell zsh)"
+```
+
+这段输出必须放在最后一行：它注册 `precmd`/`preexec` 钩子，之后定义的钩子虽然照样工作，但 kc 会看不到要记录的命令。
+
+- 记录方式：`preexec` 抓命令原文，`precmd` 取 `$?`。成功失败都记，空回车不记
+- `↑` 打开 kc TUI；`Enter` 执行、`Tab`/`→` 插入不执行、`Esc` 取消且命令行不变
+- `↑` 不再浏览 zsh 历史，原生 `Ctrl+R` 反向搜索保留不动
+- 需要设置 `KC_CONFIG_DIR`（与其它平台一致），历史库仍在 `~/.kc/history.db`
+- 不包含：`kc import --shell zsh`、`zsh-autosuggestions` 预览（下一期）
+
 ## 命令历史
 
 kc 自己记录命令历史，不依赖 Atuin 等外部工具。
