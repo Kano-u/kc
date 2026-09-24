@@ -137,7 +137,7 @@ fn render_row(
     if let Some(note) = app.notes.get(command).filter(|note| !note.is_empty()) {
         line.spans.push(Span::styled(
             format!("   {note}"),
-            Style::default().fg(CHROME),
+            Style::default().fg(Color::Yellow),
         ));
     }
     if selected {
@@ -309,7 +309,7 @@ fn render_delete_confirm(frame: &mut ratatui::Frame, app: &mut App) {
 
     if let Some(note) = app.notes.get(&command).filter(|note| !note.is_empty()) {
         frame.render_widget(
-            Paragraph::new(format!("备注：{note}")).style(Style::default().fg(CHROME)),
+            Paragraph::new(format!("备注：{note}")).style(Style::default().fg(Color::Yellow)),
             rows[2],
         );
     }
