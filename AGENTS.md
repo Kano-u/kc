@@ -1,5 +1,16 @@
 # AGENTS.md
 
+## 开发环境
+
+源码只有一份，留在 `/mnt/c`（Windows 盘）。不搬到 WSL：慢的是 `target/`，不是源码。
+实测（增量 release 构建，源码都在 `/mnt/c`）：target 在 `/mnt/c` 21s，target 在 ext4 13s。
+
+- 编译 Windows 用本机，`target/` 默认落在 NTFS
+- 编译 Linux 用 WSL，`~/.bashrc` 里已设 `CARGO_TARGET_DIR=$HOME/kc-target`，`target/` 落在 ext4
+
+两边各自写本机盘，互不干扰。WSL 里产物路径是 `$CARGO_TARGET_DIR/release/kc`，
+不是 `./target/release/kc`。
+
 ## 非常重要、需要遵循的原则
 
 遵循 Go 语言"少就是多" 的哲学
