@@ -1,0 +1,6 @@
+# 内嵌资源必须逐字节稳定。
+#
+# rustc 会把源文件里的 raw string 做行尾归一化，但 include_str! 原样读入字节。
+# core.autocrlf=true 时 git 会在检出时把文本转成 CRLF，于是 predictor.cs 的
+# 字节随检出环境变化，生成脚本的 base64 也跟着变。钉成 LF 才有唯一的产物。
+src/shell_init/predictor.cs text eol=lf
