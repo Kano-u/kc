@@ -112,6 +112,34 @@ _kc_precmd() {
 
 preexec_functions=(_kc_preexec $preexec_functions)
 precmd_functions=(_kc_precmd $precmd_functions)
+
+# zle -I hands the terminal to the TUI; without it ZLE and the full-screen
+# TUI fight over the screen. zle reset-prompt then redraws the line, which
+# is what leaves the prompt clean after the alternate screen is restored.
+#
+# kc pick emits JSON and jq parses it: hand-rolled parsing would break on
+# multi-line commands and quotes, and JSON escaping is the one format kc
+# promises. 'jq -r' also drops the quotes a raw JSON string would keep.
+_kc_pick() {
+  zle -I
+  local result_file=$(mktemp)
+  KC_QUERY=$BUFFER KC_RESULT_FILE=$result_file \
+    kc pick --query-env KC_QUERY --result-file-env KC_RESULT_FILE
+  local action=$(jq -r '.action' "$result_file")
+  local command=$(jq -r '.command // empty' "$result_file")
+  rm -f "$result_file"
+  case $action in
+    insert)  BUFFER=$command; CURSOR=${#BUFFER}; zle reset-prompt ;;
+    execute) BUFFER=$command; CURSOR=${#BUFFER}; zle accept-line ;;
+    *)       zle reset-prompt ;;
+  esac
+}
+zle -N _kc_pick
+
+# terminfo first, literal sequence as fallback: on terminals whose terminfo
+# lacks kcuu1 the literal is the only way UpArrow reaches the widget.
+[[ -n ${terminfo[kcuu1]} ]] && bindkey ${terminfo[kcuu1]} _kc_pick
+bindkey '^[[A' _kc_pick
 "#;
 
 /// 这份脚本必须保持纯 ASCII：它经 `kc init --shell powershell | Invoke-Expression`
@@ -614,6 +642,65 @@ mod tests {
         assert!(ZSH.contains("kc record --command-env KC_COMMAND"));
         assert!(ZSH.contains("_kc_pending=$1"));
         assert!(ZSH.contains("unset KC_RECORD KC_COMMAND _kc_pending"));
+    }
+
+    #[test]
+    fn zsh_pick_hands_the_terminal_over_before_running_the_tui() {
+        assert!(ZSH.contains("zle -I"), "ZLE 与全屏 TUI 会抢屏幕");
+    }
+
+    #[test]
+    fn zsh_pick_inserts_without_executing_and_executes_on_accept() {
+        let insert = ZSH
+            .split_once("insert)")
+            .expect("insert 分支缺失")
+            .1
+            .lines()
+            .next()
+            .expect("insert 分支为空");
+        let execute = ZSH
+            .split_once("execute)")
+            .expect("execute 分支缺失")
+            .1
+            .lines()
+            .next()
+            .expect("execute 分支为空");
+        assert!(insert.contains("zle reset-prompt"));
+        assert!(!insert.contains("accept-line"));
+        assert!(execute.contains("zle accept-line"));
+    }
+
+    #[test]
+    fn zsh_pick_binds_up_arrow_from_terminfo_with_a_literal_fallback() {
+        assert!(ZSH.contains("terminfo[kcuu1]"));
+        assert!(ZSH.contains("bindkey '^[[A' _kc_pick"));
+        assert!(ZSH.contains("zle -N _kc_pick"));
+    }
+
+    #[test]
+    fn zsh_pick_parses_the_json_with_jq_and_never_by_hand() {
+        assert!(ZSH.contains("jq -r '.action'"));
+        assert!(ZSH.contains("jq -r '.command // empty'"));
+        // 结果文件只经由 jq 读：手写解析会在多行命令、引号、反斜杠上出错。
+        for line in ZSH.lines().filter(|line| line.contains("$result_file")) {
+            let parsed = line.contains("jq -r")
+                || line.contains("rm -f")
+                || line.contains("KC_RESULT_FILE=$result_file");
+            assert!(parsed, "结果文件出现了非 jq 的读取: {line}");
+        }
+    }
+
+    #[test]
+    fn zsh_pick_passes_the_current_buffer_as_the_query() {
+        assert!(ZSH.contains("KC_QUERY=$BUFFER KC_RESULT_FILE=$result_file"));
+        assert!(ZSH.contains("kc pick --query-env KC_QUERY --result-file-env KC_RESULT_FILE"));
+    }
+
+    #[test]
+    fn zsh_script_contains_both_the_hooks_and_the_picker() {
+        // 两个能力必须进同一份常量，否则 eval 一次只能拿到一半。
+        assert!(ZSH.contains("_kc_precmd"));
+        assert!(ZSH.contains("_kc_pick"));
     }
 
     #[test]
