@@ -3,7 +3,7 @@ use crate::data_paths::preview_cache;
 use std::path::Path;
 use std::process::ExitCode;
 
-const USAGE: &str = "kc init --shell powershell";
+const USAGE: &str = "kc init --shell powershell|zsh";
 const ALLOWED: &[&str] = &["--shell"];
 
 /// 缓存文件的绝对路径在运行时替换进来：脚本本体是编译期常量，必须保持纯 ASCII。
@@ -19,30 +19,37 @@ pub fn main(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match values.get("--shell").map(String::as_str) {
-        Some("powershell") => match rendered() {
-            Ok(script) => {
-                print!("{script}");
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                eprintln!("kc init: {error}");
-                ExitCode::FAILURE
-            }
-        },
+    let script = match values.get("--shell").map(String::as_str) {
+        Some("powershell") => rendered_powershell(),
+        Some("zsh") => Ok(rendered_zsh().to_owned()),
         _ => {
-            eprintln!("只支持 --shell powershell。\n用法: {USAGE}");
-            ExitCode::from(2)
+            eprintln!("只支持 --shell powershell 或 zsh。\n用法: {USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    match script {
+        Ok(script) => {
+            print!("{script}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("kc init: {error}");
+            ExitCode::FAILURE
         }
     }
 }
 
-fn rendered() -> Result<String, String> {
+fn rendered_powershell() -> Result<String, String> {
     let uri = format!(
         "data:text/plain;charset=utf-8;base64,{}",
         base64(PREDICTOR.as_bytes())
     );
     Ok(script(&preview_cache()?, &uri))
+}
+
+/// zsh 版本不碰预测器，也就没有 base64 与路径占位符要替换：整份脚本是一个常量。
+fn rendered_zsh() -> &'static str {
+    ZSH
 }
 
 /// 路径写进 PowerShell 单引号字符串：反斜杠不被解释，路径里的单引号写成两个。
@@ -75,6 +82,37 @@ fn base64(input: &[u8]) -> String {
     }
     output
 }
+
+/// zsh 版本（Termux/WSL）。注释写英文并非编码需要，而是避免再多一条要验证的规则。
+///
+/// 两个钩子分工是必须的：`preexec` 的 `$1` 才是用户输入原文，状态则要在
+/// `precmd` 取。钩子顺序不影响 `$?`：zsh 在每个 hook 函数进出时都会保存并恢复它，
+/// 所以不管 `_kc_precmd` 排在哪里，读到的都是上一条命令的真实状态。
+/// 仍然独立取状态的原因是 `preexec` 里 `$?` 指的是之前的东西，不是刚要跑的命令。
+const ZSH: &str = r#"# Keep this block as the last statement of .zshrc.
+# It defines precmd/preexec hooks; anything defined after it still works,
+# but kc would stop seeing commands.
+
+# Hook order does not matter: zsh restores $? for each hook function, so
+# _kc_precmd sees the real status wherever it sits. Keep 'local ok=$?'
+# the first line of _kc_precmd, though: any statement before it overwrites it.
+_kc_pending=
+
+_kc_preexec() {
+  _kc_pending=$1
+}
+
+_kc_precmd() {
+  local ok=$?
+  [[ -n $_kc_pending ]] || return 0
+  KC_RECORD=$(( ok == 0 ? 1 : 0 )) KC_COMMAND=$_kc_pending \
+    kc record --command-env KC_COMMAND
+  unset KC_RECORD KC_COMMAND _kc_pending
+}
+
+preexec_functions=(_kc_preexec $preexec_functions)
+precmd_functions=(_kc_precmd $precmd_functions)
+"#;
 
 /// 这份脚本必须保持纯 ASCII：它经 `kc init --shell powershell | Invoke-Expression`
 /// 进入 PowerShell，而管道的解码用的是控制台代码页。非 ASCII 字节在
@@ -535,6 +573,47 @@ mod tests {
         assert!(!POWERSHELL.contains("bash"));
         assert!(!POWERSHELL.contains("READLINE_LINE"));
         assert!(!POWERSHELL.contains("atuin"));
+    }
+
+    #[test]
+    fn zsh_output_is_ascii_and_succeeds() {
+        assert_eq!(
+            main(&["--shell".to_owned(), "zsh".to_owned()]),
+            ExitCode::SUCCESS
+        );
+        assert!(rendered_zsh().is_ascii(), "zsh 脚本含非 ASCII 字节");
+        assert_eq!(rendered_zsh(), ZSH);
+    }
+
+    #[test]
+    fn zsh_registers_the_hooks_without_overwriting_existing_ones() {
+        // 追加式赋值会覆盖别人的钩子，必须保留原有函数数组。
+        assert!(ZSH.contains("precmd_functions=(_kc_precmd $precmd_functions)"));
+        assert!(ZSH.contains("preexec_functions=(_kc_preexec $preexec_functions)"));
+        assert!(!ZSH.contains("precmd_functions+=("));
+        assert!(!ZSH.contains("preexec_functions+=("));
+    }
+
+    #[test]
+    fn zsh_captures_the_status_on_the_first_precmd_line() {
+        let precmd = ZSH
+            .split_once("_kc_precmd() {")
+            .expect("_kc_precmd 函数缺失")
+            .1;
+        let first = precmd
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !line.starts_with('#'))
+            .expect("_kc_precmd 函数体为空");
+        assert_eq!(first, "local ok=$?");
+    }
+
+    #[test]
+    fn zsh_records_the_command_with_its_status() {
+        assert!(ZSH.contains("KC_RECORD=$(( ok == 0 ? 1 : 0 ))"));
+        assert!(ZSH.contains("kc record --command-env KC_COMMAND"));
+        assert!(ZSH.contains("_kc_pending=$1"));
+        assert!(ZSH.contains("unset KC_RECORD KC_COMMAND _kc_pending"));
     }
 
     #[test]
