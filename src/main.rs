@@ -25,8 +25,8 @@ const USAGE: &str = "kc - Shell 历史记录笔记与搜索
                           导入 PowerShell 历史记录
   kc export               把历史与备注导出为预览缓存
   kc psreadline-patch     给 PSReadLine 打补丁，让备注显示在每行候选后面
-  kc init --shell powershell
-                          打印 PowerShell 集成脚本
+  kc init --shell powershell|zsh
+                          打印 shell 集成脚本
   kc --help               显示此帮助
 
 环境变量:
