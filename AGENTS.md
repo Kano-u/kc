@@ -2,8 +2,8 @@
 
 ## 开发环境
 
-源码只有一份，留在 `/mnt/c`（Windows 盘）。不搬到 WSL：慢的是 `target/`，不是源码。
-实测（增量 release 构建，源码都在 `/mnt/c`）：target 在 `/mnt/c` 21s，target 在 ext4 13s。
+源码只有一份，留在 `/mnt/d/2/kc`（Windows 盘）。不搬到 WSL：慢的是 `target/`，不是源码。
+实测（增量 release 构建，源码都在 `/mnt/d/2/kc`）：target 在 `/mnt/d/2/kc` 21s，target 在 ext4 13s。
 
 - 编译 Windows 用本机，`target/` 默认落在 NTFS
 - 编译 Linux 用 WSL，`~/.bashrc` 里已设 `CARGO_TARGET_DIR=$HOME/kc-target`，`target/` 落在 ext4
